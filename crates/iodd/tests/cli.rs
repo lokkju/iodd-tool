@@ -77,11 +77,11 @@ fn documented_doctor_flags_are_accepted() {
 }
 
 /// Subcommands not yet built must fail cleanly rather than silently
-/// succeeding. `verify` left this list in phase 2, `retype` in phase 3.
+/// succeeding. `verify` left this list in phase 2, `retype` in phase 3, and
+/// `create` in phase 4.
 #[test]
 fn unbuilt_subcommands_say_so() {
     for sub in [
-        vec!["create", "--size", "1M", "--out", "/tmp/x.vhd"],
         vec!["convert", "--source", "/tmp/a", "--out", "/tmp/b.vhd"],
         vec!["doctor", "/tmp"],
     ] {

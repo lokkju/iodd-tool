@@ -1,6 +1,267 @@
+//! `iodd create` — a blank fixed VHD/RMD of a given size.
+//!
+//! # Zeroing is off by default (design D9)
+//!
+//! `VhdTool.exe`, which is what VHD Tool++ actually shells out to, allocates
+//! with `SetFileValidData` and never writes the data region. That is what
+//! "instantly creates fixed-size VHD files" means, and it is why the tool needs
+//! `SE_MANAGE_VOLUME` — the privilege exists precisely because the API exposes
+//! deleted data.
+//!
+//! We match that, because instant creation is the point. `--zero` opts into a
+//! full pass, and without it `create` prints a warning that says plainly what
+//! the file contains.
+
 use crate::cli::CreateArgs;
 use crate::error::{Error, Result};
+use crate::footer::{Creator, Footer};
+use crate::size;
+use ntfs_contig::alloc::{self, AllocOutcome, NoProgress, Progress, TempTarget, TtyProgress};
+use ntfs_contig::fsinfo;
+use std::path::{Path, PathBuf};
 
-pub fn run(_args: &CreateArgs) -> Result<u8> {
-    Err(Error::NotImplemented("create"))
+pub fn run(args: &CreateArgs) -> Result<u8> {
+    // ---- validate ----------------------------------------------------------
+    let virtual_size = size::parse(&args.size)?;
+    size::require_512_aligned(virtual_size)?;
+    if let Some(warning) = size::mib_alignment_warning(virtual_size) {
+        eprintln!("iodd: warning: {warning}");
+    }
+    // VHD Tool++ refuses anything under 12 MB. Whether that is a device floor
+    // or a VhdTool one is unknown, so this warns rather than refuses.
+    const VENDOR_MINIMUM: u64 = 12 * 1024 * 1024;
+    if virtual_size < VENDOR_MINIMUM {
+        eprintln!(
+            "iodd: warning: {} is below the 12 MiB minimum VHD Tool++ enforces; \
+             the device may not mount it",
+            size::humanize(virtual_size)
+        );
+    }
+
+    let creator = Creator::parse(&args.creator).map_err(Error::Usage)?;
+    let out = resolve_extension(&args.out, args.removable);
+    let total_size = virtual_size
+        .checked_add(u64::try_from(crate::footer::FOOTER_SIZE).unwrap_or(512))
+        .ok_or_else(|| Error::Usage("size + 512 overflows a 64-bit byte count".into()))?;
+
+    if out.exists() && !args.force {
+        return Err(Error::TargetExists { path: out });
+    }
+
+    let dir = alloc::parent_dir(&out);
+    if !dir.is_dir() {
+        return Err(Error::Usage(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    // Pre-flight: a new file inherits the directory's compression attribute, so
+    // catching it here avoids doing the work first. It is checked again on the
+    // created file before publishing.
+    if let Ok(d) = std::fs::File::open(dir)
+        && matches!(
+            fsinfo::is_compressed(std::os::fd::AsFd::as_fd(&d)),
+            Ok(Some(true))
+        )
+    {
+        return Err(Error::Compressed {
+            path: dir.to_path_buf(),
+        });
+    }
+
+    println!(
+        "creating {} ({} virtual + 512 footer = {} bytes)",
+        out.display(),
+        size::humanize(virtual_size),
+        total_size
+    );
+
+    // ---- 1. reserve --------------------------------------------------------
+    let target = TempTarget::create(&out, args.keep_on_fail)?;
+    let outcome = alloc::allocate(target.file(), total_size, target.path())?;
+
+    let must_write = match outcome {
+        AllocOutcome::Reserved => false,
+        AllocOutcome::Unsupported => {
+            eprintln!(
+                "iodd: warning: this filesystem does not support fallocate; \
+                 the file will be allocated by writing it, which forces a full pass"
+            );
+            true
+        }
+    };
+
+    // ---- 2. early extent check --------------------------------------------
+    // Before any data is written, so a doomed target costs nothing.
+    if outcome == AllocOutcome::Reserved {
+        alloc::require_contiguous(target.file(), total_size, target.path())?;
+    }
+
+    // ---- 3. zero, if asked -------------------------------------------------
+    let zeroed = args.zero || must_write;
+    if zeroed {
+        let mut tty = TtyProgress::new("zeroing");
+        let mut none = NoProgress;
+        let progress: &mut dyn Progress = match tty.as_mut() {
+            Some(p) => p,
+            None => &mut none,
+        };
+        alloc::zero_region(target.file(), 0, total_size, target.path(), progress)?;
+    }
+
+    // ---- 4. post-write checks ---------------------------------------------
+    alloc::verify_written(target.file(), total_size, target.path(), zeroed)?;
+
+    // ---- 5. footer in place ------------------------------------------------
+    let footer = Footer::now(virtual_size, creator);
+    target.write_at(&footer.to_bytes(), virtual_size)?;
+
+    // ---- 6. re-verify, then publish ---------------------------------------
+    alloc::require_contiguous(target.file(), total_size, target.path())?;
+    if matches!(
+        fsinfo::is_compressed(std::os::fd::AsFd::as_fd(target.file())),
+        Ok(Some(true))
+    ) {
+        return Err(Error::Compressed { path: out.clone() });
+    }
+
+    target.finalize(args.force)?;
+
+    println!(
+        "  geometry      {}/{}/{}",
+        footer.geometry.cylinders, footer.geometry.heads, footer.geometry.sectors_per_track
+    );
+    println!("  creator       {creator}");
+    println!("  contiguous    yes (1 extent)");
+    println!("  zeroed        {}", if zeroed { "yes" } else { "no" });
+    println!("{} created", out.display());
+
+    if !zeroed {
+        eprintln!();
+        eprintln!(
+            "iodd: warning: the data region was NOT zeroed. It holds whatever was \
+             previously on those clusters."
+        );
+        eprintln!(
+            "iodd: the filesystem will report zeros, but the IODD reads sectors \
+             straight off the device and will hand the guest the old bytes."
+        );
+        eprintln!(
+            "iodd: this matches VhdTool.exe. If the disk may be seen by anyone else, \
+             or booted on a machine you do not control, pass --zero."
+        );
+    }
+
+    Ok(0)
+}
+
+/// Apply the default extension, and warn when an explicit one contradicts
+/// `--removable`.
+///
+/// `.vhd` presents as a USB fixed drive and `.rmd` as removable; the bytes are
+/// identical either way, so this is presentation only.
+///
+/// Only *recognized* extensions count as deliberate. `Path` treats anything
+/// after the last dot as an extension, so honouring whatever it finds would
+/// leave `--out "Win11 23H2.v2"` named exactly that, with no `.vhd` at all and
+/// nothing the device would recognize. A dot in the stem is far commoner than
+/// an exotic deliberate extension.
+fn resolve_extension(out: &Path, removable: bool) -> PathBuf {
+    /// Extensions IODD recognizes; anything else is treated as part of the name.
+    const RECOGNIZED: [&str; 5] = ["vhd", "rmd", "vmdk", "ima", "iso"];
+
+    let wanted = if removable { "rmd" } else { "vhd" };
+
+    let Some(ext) = out.extension().and_then(|e| e.to_str()) else {
+        return append_extension(out, wanted);
+    };
+
+    let lower = ext.to_ascii_lowercase();
+    if !RECOGNIZED.contains(&lower.as_str()) {
+        return append_extension(out, wanted);
+    }
+
+    if (lower == "rmd" && !removable) || (lower == "vhd" && removable) {
+        eprintln!(
+            "iodd: warning: --out ends in .{lower} but --removable {}; \
+             honouring the extension you gave",
+            if removable {
+                "was given"
+            } else {
+                "was not given"
+            }
+        );
+    }
+    out.to_path_buf()
+}
+
+/// Append rather than replace, so dotted stems survive.
+fn append_extension(out: &Path, ext: &str) -> PathBuf {
+    let mut name = out.as_os_str().to_os_string();
+    name.push(".");
+    name.push(ext);
+    PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_defaults_to_vhd_or_rmd() {
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk"), false),
+            PathBuf::from("/a/disk.vhd")
+        );
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk"), true),
+            PathBuf::from("/a/disk.rmd")
+        );
+    }
+
+    #[test]
+    fn an_explicit_extension_is_honoured() {
+        // Including a contradictory one: the operator was specific, so we warn
+        // rather than override.
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk.rmd"), false),
+            PathBuf::from("/a/disk.rmd")
+        );
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk.vhd"), true),
+            PathBuf::from("/a/disk.vhd")
+        );
+    }
+
+    #[test]
+    fn other_recognized_extensions_are_left_alone() {
+        // IODD reads .vmdk as fixed-VHD bytes under another name.
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk.vmdk"), false),
+            PathBuf::from("/a/disk.vmdk")
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_suffix_is_treated_as_part_of_the_name() {
+        // Path calls ".v2" an extension. Honouring it would leave the file
+        // named "Win11 23H2.v2", which the device would not recognize.
+        assert_eq!(
+            resolve_extension(Path::new("/a/Win11 23H2.v2"), false),
+            PathBuf::from("/a/Win11 23H2.v2.vhd")
+        );
+        assert_eq!(
+            resolve_extension(Path::new("/a/backup.2026.01"), true),
+            PathBuf::from("/a/backup.2026.01.rmd")
+        );
+    }
+
+    #[test]
+    fn mode_tags_in_filenames_survive() {
+        // "&D" and "&DW" are IODD dual-mode tags and live in the filename.
+        assert_eq!(
+            resolve_extension(Path::new("/a/disk&DW"), false),
+            PathBuf::from("/a/disk&DW.vhd")
+        );
+    }
 }

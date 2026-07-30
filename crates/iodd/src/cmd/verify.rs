@@ -69,10 +69,10 @@ pub fn run(args: &VerifyArgs) -> Result<u8> {
     }
 
     // ---- footer: reported, never fatal unless --strict ---------------------
-    let mut footer_problems: Vec<String> = Vec::new();
+    let mut soft_findings: Vec<String> = Vec::new();
 
     if file_size < footer::FOOTER_SIZE as u64 {
-        footer_problems.push(format!(
+        soft_findings.push(format!(
             "file is {file_size} bytes, too small to hold a 512-byte footer"
         ));
         println!("  footer        absent (file too small)");
@@ -111,7 +111,7 @@ pub fn run(args: &VerifyArgs) -> Result<u8> {
             println!("  footer        {} problem(s)", problems.len());
             for p in &problems {
                 println!("                - {p}");
-                footer_problems.push(p.to_string());
+                soft_findings.push(p.to_string());
             }
         }
     }
@@ -127,10 +127,19 @@ pub fn run(args: &VerifyArgs) -> Result<u8> {
             expected: file_size,
         });
     }
+    // Uninitialized extents are a warning, not a hard gate.
+    //
+    // The device mounts such a file perfectly well — it is what `VhdTool.exe`
+    // produces and what `iodd create` produces without `--zero` (design D9).
+    // What the guest sees in never-written regions is stale host data rather
+    // than zeros, which is a correctness and disclosure concern but not a
+    // mount failure, so it belongs with the soft findings.
     if map.any_unwritten {
-        return Err(Error::Uninitialized {
-            path: path.to_path_buf(),
-        });
+        soft_findings.push(
+            "the data region contains uninitialized extents; a guest will see \
+             whatever was previously on those clusters, not zeros"
+                .to_string(),
+        );
     }
 
     // An allocated file that reports no extents at all is not something we are
@@ -158,24 +167,27 @@ pub fn run(args: &VerifyArgs) -> Result<u8> {
         return Err(Error::Fragmented {
             path: path.to_path_buf(),
             runs: map.runs.clone(),
-            free_bytes: path.parent().and_then(fsinfo::free_space),
-            largest_free_run: path.parent().and_then(fsinfo::largest_free_run),
+            free_bytes: fsinfo::free_space(ntfs_contig::alloc::parent_dir(path)),
+            largest_free_run: fsinfo::largest_free_run(ntfs_contig::alloc::parent_dir(path)),
         });
     }
 
     // ---- soft findings -----------------------------------------------------
-    if !footer_problems.is_empty() {
+    if !soft_findings.is_empty() {
         if args.strict {
             return Err(Error::Footer {
                 path: path.to_path_buf(),
-                reason: footer_problems.join("; "),
+                reason: soft_findings.join("; "),
             });
         }
         eprintln!(
-            "iodd: warning: {} footer problem(s); the device mounts files \
-             without a valid footer, so this is not fatal. Use --strict to fail.",
-            footer_problems.len()
+            "iodd: warning: {} finding(s) that do not prevent mounting. \
+             Use --strict to fail on them.",
+            soft_findings.len()
         );
+        for f in &soft_findings {
+            eprintln!("iodd:   - {f}");
+        }
     }
 
     Ok(0)
