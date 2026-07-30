@@ -42,12 +42,36 @@ only governance file is `AUTHORS`, which is attribution. True dual-licensing
 (MySQL, Qt) requires the vendor to own the whole copyright, normally via a CLA
 that assigns it or grants a broad relicensing right.
 
-The commercial product, "Microsoft NTFS by Tuxera", is a separate proprietary
-embedded implementation sold to OEMs — advertised as up to six times faster,
-with patented enhancements. It is not ntfs-3g under another licence.
+The commercial product, "Microsoft NTFS by Tuxera", is marketed as a
+proprietary embedded implementation sold to OEMs, advertised as up to six
+times faster and carrying patented enhancements.
 
-So the arrangement is two products from one company: a GPL project Tuxera
-maintains but does not own, and a proprietary product it wrote and does own.
+**Whether it is genuinely a separate codebase is unverified.** An earlier
+version of this document asserted it was. That assertion rested on marketing
+copy, which is not evidence. Correcting it:
+
+- No public reverse-engineering or binary comparison appears to exist. The
+  embedded product ships to OEMs inside firmware under NDA, so it is not
+  obtainable; the Mac consumer product is downloadable and could be analysed
+  with established GPL-compliance techniques, but no such analysis was found.
+- Tuxera's own NTFS-3G FAQ is ambiguous and arguably cuts the other way,
+  describing the commercial offering only as "an optimized, high-performance
+  version, primarily for consumer electronics devices" — which in an NTFS-3G
+  FAQ reads more like a version *of* NTFS-3G than an independent one.
+- The only violation allegations found (TechRights, 2012 and 2014) are from a
+  partisan source, attributed to unnamed developers, carry no analysis, and
+  concern XFS and HFS+ rather than NTFS.
+
+Two observations favour the benign reading without proving it. Szakacsits
+founded Tuxera and holds around 30 notices, so he may relicense his own
+contributions freely — and the FUSE driver layer he wrote is distinct from the
+older `libntfs` inherited from linux-ntfs that Altaparmakov dominates. And the
+parties with standing have been quiet for eighteen years: André is the active
+maintainer working alongside Tuxera's stewardship, and Altaparmakov wrote the
+original in-kernel NTFS driver. Neither has publicly objected.
+
+So the arrangement *appears* to be two products from one company, but that
+rests on inference rather than verification.
 
 This **weakens** the commercial-incentive argument above. Under true
 dual-licensing, enforcement directly sells a licence to the same code, which
