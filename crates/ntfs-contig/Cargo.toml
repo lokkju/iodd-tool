@@ -1,0 +1,38 @@
+[package]
+name = "ntfs-contig"
+version = "0.1.0"
+description = "Allocate and verify contiguous, fully-allocated files on NTFS and other Linux filesystems"
+keywords = ["ntfs", "fiemap", "contiguous", "fragmentation", "extents"]
+categories = ["command-line-utilities", "filesystem"]
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+thiserror.workspace = true
+clap = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+
+[features]
+default = ["cli"]
+# The standalone `ntfs-contig` binary. Depending on the library alone does not
+# pull in clap or serde.
+cli = ["dep:clap", "dep:serde", "dep:serde_json"]
+# Integration tests needing sudo and a loopback NTFS volume.
+ntfs-integration = []
+
+[[bin]]
+name = "ntfs-contig"
+required-features = ["cli"]
+
+[lints]
+workspace = true

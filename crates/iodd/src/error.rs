@@ -6,16 +6,7 @@
 
 use std::path::PathBuf;
 
-/// A physically contiguous run of a file, as reported by the extent map.
-///
-/// Defined here rather than in `extents` so `Error` has no dependency on the
-/// engine; `extents` re-exports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Run {
-    pub logical: u64,
-    pub physical: u64,
-    pub length: u64,
-}
+pub use ntfs_contig::Run;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -81,6 +72,49 @@ pub enum Error {
     // ---- scaffolding, removed as phases land ---------------------------
     #[error("{0} is not implemented yet")]
     NotImplemented(&'static str),
+}
+
+/// Engine errors map onto the matching `iodd` variants, so the `SPEC.md` exit
+/// code table stays the single source of truth for both.
+impl From<ntfs_contig::Error> for Error {
+    fn from(e: ntfs_contig::Error) -> Self {
+        use ntfs_contig::Error as E;
+        match e {
+            E::Io { path, source } => Error::Io { path, source },
+            E::Allocation {
+                path,
+                requested,
+                reason,
+            } => Error::Allocation {
+                path,
+                requested,
+                reason,
+            },
+            E::Fragmented {
+                path,
+                runs,
+                free_bytes,
+                largest_free_run,
+            } => Error::Fragmented {
+                path,
+                runs,
+                free_bytes,
+                largest_free_run,
+            },
+            E::Sparse {
+                path,
+                allocated,
+                expected,
+            } => Error::Sparse {
+                path,
+                allocated,
+                expected,
+            },
+            E::Uninitialized { path } => Error::Uninitialized { path },
+            E::Compressed { path } => Error::Compressed { path },
+            E::Unverifiable { path, reason } => Error::Unverifiable { path, reason },
+        }
+    }
 }
 
 impl Error {

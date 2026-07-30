@@ -99,4 +99,4 @@ jobs:
             ${{ runner.os }}-cargo-musl-
 
       - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cargo build --release --workspace --target x86_64-unknown-linux-musl

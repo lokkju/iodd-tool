@@ -319,3 +319,32 @@ fn retype_reports_a_missing_file() {
         .assert()
         .code(1);
 }
+
+/// Design D3: `--strict` governs *footer* findings only. The hard gates fire
+/// with or without it, because the device rejects such a file regardless of
+/// which flags we were invoked with. The engine-side sparseness test lives in
+/// the ntfs-contig crate; this asserts iodd's flag does not soften it.
+#[test]
+fn strict_does_not_change_the_hard_gates() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sparse.vhd");
+
+    let f = std::fs::File::create(&path).expect("create");
+    f.set_len(8 * 1024 * 1024).expect("truncate");
+    f.sync_all().expect("sync");
+    drop(f);
+
+    let meta = std::fs::metadata(&path).expect("stat");
+    if meta.blocks() * 512 >= meta.len() {
+        eprintln!("filesystem does not create sparse files here; skipping");
+        return;
+    }
+
+    for args in [
+        vec!["verify", &*path.to_string_lossy()],
+        vec!["verify", &*path.to_string_lossy(), "--strict"],
+    ] {
+        iodd().args(&args).assert().code(5);
+    }
+}
