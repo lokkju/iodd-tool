@@ -154,7 +154,8 @@ statement is correct.
 | D2 | Footer problems are `WARN`, never `WILL-NOT-MOUNT` | F1, F2. Hard-gating reports a known-working file as broken. |
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
-| D5 | Zeroing policy determined by measurement, not assumption | Phase 0 spike. See below. |
+| D5 | **Zeroing is mandatory.** Resolved by measurement | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
+| D7 | Allocation needs a strategy, not one syscall | Phase 0 found `fallocate` splits a 1 GiB file into two runs on an *empty* volume. See `spike/FINDINGS.md` S2. |
 | D6 | Contiguity engine built and proven first | Highest-risk component; everything else depends on it. |
 
 D2 and D4 are provisional and tracked as issues. D2 should be revisited once a
@@ -276,11 +277,46 @@ Secondary questions the spike answers:
   a static musl binary, the implementation calls raw `fallocate(2)` and handles
   the fallback itself rather than depending on libc behavior.
 
-Deliverable: a findings document committed to the repo, plus the decision on
-default zeroing behavior.
-
 The spike needs `sudo` for `mount`. Integration tests that depend on it are
 feature-gated so CI can skip them.
+
+### Results
+
+Run 2026-07-29. Full write-up in [`spike/FINDINGS.md`](../../../spike/FINDINGS.md).
+
+- **S1. `fallocate` does not zero on ntfs3.** Six of six samples read back the
+  pre-deletion pattern from the raw device while the filesystem reported
+  zeros. D5 resolved: zeroing is mandatory.
+- **S2. `fallocate` does not produce one extent.** A 1 GiB allocation on a
+  freshly emptied 4 GiB volume returned two runs separated by a ~1.5 GiB
+  physical gap. This is the more consequential finding, and it invalidates the
+  `SPEC.md` approach of "call `posix_fallocate`, then verify": on an empty
+  volume that approach refuses to create the file. Raised as D7.
+- **S3. Fresh allocations carry `FIEMAP_EXTENT_UNWRITTEN`.** This closes the
+  F6 question and provides a one-ioctl detector for an uninitialized region,
+  usable as post-write verification.
+- **S4.** `fallocate(2)` mode 0 is supported (no `EOPNOTSUPP`), and the
+  `st_blocks` sparseness check behaves as specified.
+
+All of the above measures the **ntfs3 driver**, which is what this tool calls.
+The IODD device has its own NTFS reader in firmware and is not ntfs3. The
+inference that a guest would observe the stale bytes is deferred to hardware
+acceptance.
+
+### Follow-up: allocation strategy
+
+`spike/allocation-strategy.sh` compares three strategies on freshly formatted
+volumes: one `fallocate` call, a sequential zero write with no `fallocate`,
+and `fallocate` followed by an overwrite.
+
+The hypothesis worth testing is that S1 and S2 cancel out. Zeroing is
+mandatory per S1, so if a sequential write lands contiguously where
+`fallocate` does not, then a single pass both allocates and zeroes and the
+zeroing requirement costs nothing beyond the write we already owe.
+
+If neither strategy is reliably contiguous, allocation on ntfs3 cannot be
+steered from userspace, and the tool's honest position is to verify and refuse
+with diagnostics rather than to promise contiguity it cannot deliver.
 
 ## Testing
 
