@@ -76,13 +76,31 @@ fn documented_doctor_flags_are_accepted() {
         .stdout(contains("--iso-max-fragments"));
 }
 
-/// Phase 1 ships the surface, not the behaviour. Each subcommand must fail
-/// cleanly rather than silently succeeding.
+/// Subcommands not yet built must fail cleanly rather than silently
+/// succeeding. `verify` left this list in phase 2.
 #[test]
-fn subcommands_are_not_yet_implemented() {
-    iodd()
-        .args(["verify", "/nonexistent"])
-        .assert()
-        .failure()
-        .stderr(contains("not implemented"));
+fn unbuilt_subcommands_say_so() {
+    for sub in [
+        vec!["create", "--size", "1M", "--out", "/tmp/x.vhd"],
+        vec!["convert", "--source", "/tmp/a", "--out", "/tmp/b.vhd"],
+        vec!["doctor", "/tmp"],
+        vec!["retype", "/tmp/x.vhd", "--to", "removable"],
+    ] {
+        iodd()
+            .args(&sub)
+            .assert()
+            .failure()
+            .stderr(contains("not implemented"));
+    }
+}
+
+/// A missing file is a usage error (exit 1), not a structural failure.
+#[test]
+fn verify_reports_a_missing_file_as_usage() {
+    iodd().args(["verify", "/nonexistent-zzz"]).assert().code(1);
+}
+
+#[test]
+fn verify_rejects_a_directory() {
+    iodd().args(["verify", "/tmp"]).assert().code(1);
 }

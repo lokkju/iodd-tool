@@ -16,6 +16,17 @@
 //! arrives, so userspace has no lever on placement. See `spike/FINDINGS.md`,
 //! S7.
 
+/// The request parameter of `ioctl(2)` is `c_int` on musl and `c_ulong` on
+/// glibc. The constants themselves are the same bit pattern either way; only
+/// the declared type differs, so they are written as `u32` literals and cast.
+///
+/// Caught by the musl CI job rather than at release time, which is the whole
+/// reason that job exists.
+#[cfg(target_env = "musl")]
+pub(crate) type IoctlRequest = libc::c_int;
+#[cfg(not(target_env = "musl"))]
+pub(crate) type IoctlRequest = libc::c_ulong;
+
 pub mod alloc;
 pub mod cli;
 pub mod cmd;
