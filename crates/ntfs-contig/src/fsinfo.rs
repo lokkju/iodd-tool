@@ -23,6 +23,23 @@ const FS_IOC_GETFLAGS: crate::IoctlRequest = 0x8008_6601_u32 as crate::IoctlRequ
 /// `FS_COMPR_FL` — the file is compressed.
 const FS_COMPR_FL: libc::c_long = 0x0000_0004;
 
+/// Open a file read-only, refusing to follow a final symlink.
+///
+/// Audit tools want this: following a symlink out of the tree being scanned
+/// would report on a file that is not there, and on a removable device the
+/// target may not even exist.
+pub fn open_readonly_nofollow(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|source| crate::Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 /// True when the file lives on a volume mounted by the ntfs3 driver.
 ///
 /// A failure to interrogate is reported as "not ntfs3" rather than as an
