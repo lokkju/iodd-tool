@@ -48,16 +48,46 @@ zeroed is trimmed by 512 just the same as one with a valid footer.
   odd 20 GiB + 512 previously stated here. D1 is correct and cleaner than
   described.
 
-**What is not yet established:** whether the `.rmd` reading is caused by the
-extension or by something particular to that file. The obvious test is to
-`retype` a known `.vhd` to `.rmd` — same bytes, same inode, only the extension
-changing — and see which size the device presents. Until that runs, "`.rmd` is
-presented whole" rests on one file.
+**Resolved: the extension decides.** `retype` was used to rename
+`item-c-footer.vhd` to `.rmd` — same bytes, same inode, nothing else changed —
+and the device's presentation moved:
 
-If the extension does decide it, then `SPEC.md` lines 26-28 are wrong: `.vhd`
-and `.rmd` would not be byte-identical formats, and `retype` would not be the
-zero-cost rename it claims to be, since it would shift the guest-visible size
-by 512 bytes.
+```
+item-c-footer.vhd  ->  67108864 presented  (file - 512)
+item-c-footer.rmd  ->  67109376 presented  (whole file)
+```
+
+So:
+
+| Extension | Presented as |
+|---|---|
+| `.vhd` | file size − 512, i.e. the last sector is assumed to be a footer and hidden |
+| `.rmd` | the whole file, footer or not |
+
+**`SPEC.md` lines 26-28 are wrong.** They state the two carry identical bytes
+and that converting between them is a zero-cost rename. The bytes are indeed
+identical; the disk the guest sees is not. The difference is 512 bytes.
+
+This also explains the file that began the investigation.
+`Windows_Server_2012R2.rmd` is 40 GiB + 512 presented whole, with a GPT backup
+header in its final sector — precisely what results from creating a 40 GiB
+`.vhd` (file 40 GiB + 512, presenting 40 GiB) and then renaming it to `.rmd`,
+after which the guest saw 512 more bytes and partitioned to fit. The original
+sample was a record of exactly the operation `retype` performs.
+
+**Two consequences follow.**
+
+`retype` is not safe as documented. Converting a genuine `.rmd` to `.vhd`
+hides its final sector from the guest. On the sample file that sector holds the
+GPT backup header, so the operation would silently damage the partition table
+as the guest sees it.
+
+`create --removable` is questionable. It currently writes `virtual_size + 512`
+with a footer, which for a `.rmd` the guest will see in full — an odd
+`virtual_size + 512` disk with 512 bytes of footer at the end. To give a
+removable guest exactly the requested size, the file should be `virtual_size`
+with no footer, which is also what the `.ima` files on the device look like and
+what F2 says the device accepts.
 
 ### F2. A valid VHD footer is not required to mount
 
