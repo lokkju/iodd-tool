@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# spike and test artifacts
+/spike/out/
+*.vhd
+*.rmd
+*.ima
+*.img
+*.iso
+!tests/fixtures/**
