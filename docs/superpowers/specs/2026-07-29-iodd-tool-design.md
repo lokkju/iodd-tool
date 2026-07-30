@@ -138,9 +138,37 @@ Measured directly:
 So "real CHS + exact size" is a third combination qemu cannot emit, and the
 byte-identity test at `SPEC.md` line 199 is impossible. What *was* verified:
 the checksum algorithm reproduces qemu's stored value exactly (`ffffe586` for
-100 MiB with `force_size`, `ffffe5c7` without), and the CHS pseudocode matches
-qemu's non-`force_size` output (100 MiB gives 1004/12/17, product 204816
-sectors).
+100 MiB with `force_size`, `ffffe5c7` without).
+
+**Corrected 2026-07-29.** This finding previously added that the CHS pseudocode
+"matches qemu's non-`force_size` output (100 MiB gives 1004/12/17)". That
+wording is wrong, and it nearly caused a real bug — a draft implementation plan
+read it as evidence that `SPEC.md`'s pseudocode was miscalculating and proposed
+changing its rounding to match.
+
+The pseudocode matches qemu's `calculate_geometry`. Qemu's *output* reflects a
+search loop layered on top that **grows the requested sector count** until the
+CHS product covers it:
+
+```
+chs(204612) = 1003/12/17, product 204612   covers exactly
+chs(204800) = 1003/12/17, product 204612   does NOT cover  <- 100 MiB
+chs(204816) = 1004/12/17, product 204816   covers
+
+qemu-img create -f vpc, size 104761344 (204612 sectors)
+  -> footer CHS bytes 03eb 0c11 = 1003/12/17
+```
+
+Hand qemu a size the algorithm covers exactly and it returns 1003, matching the
+pseudocode. **The pseudocode is correct as written**, floor division throughout,
+and must be implemented unchanged. `cylinders * heads * spt <= total_sectors` is
+expected: the footer's size fields carry the truth and CHS is legacy geometry.
+D4 keeps the exact size, so the tool must not replicate qemu's growth.
+
+Consequence for testing: never compare our CHS against qemu's for a size *we*
+requested, because qemu may have grown it. Read the harvested footer's
+`Original Size`, divide by 512, and assert `chs(that_count)` equals the footer's
+CHS bytes.
 
 Also confirmed: `qemu-img create -f vpc -o subformat=fixed` leaves the data
 region sparse. A 104858112-byte file occupied 16 blocks. The spec's problem
