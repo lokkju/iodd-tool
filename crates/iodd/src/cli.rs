@@ -51,6 +51,16 @@ pub struct CreateArgs {
     #[arg(long, value_name = "TAG", default_value = "iodd")]
     pub creator: String,
 
+    /// Write zeros across the whole file before finalizing.
+    ///
+    /// Off by default, matching VhdTool.exe, which allocates with
+    /// SetFileValidData and never writes the data region. Without this the
+    /// file holds whatever was previously on those clusters: the filesystem
+    /// reports zeros, but anything reading the raw device — the IODD included
+    /// — sees the old bytes.
+    #[arg(long)]
+    pub zero: bool,
+
     /// On failure, leave the partial file in place instead of removing it
     #[arg(long)]
     pub keep_on_fail: bool,

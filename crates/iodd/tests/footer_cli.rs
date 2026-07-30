@@ -145,7 +145,7 @@ fn footer_problems_warn_by_default_and_fail_under_strict() {
         .assert()
         .success()
         .stdout(contains("GPT backup header"))
-        .stderr(contains("not fatal"));
+        .stderr(contains("do not prevent mounting"));
 
     iodd()
         .args(["verify", &path.to_string_lossy(), "--strict"])
