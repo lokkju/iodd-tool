@@ -166,7 +166,7 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 /// leave `--out "Win11 23H2.v2"` named exactly that, with no `.vhd` at all and
 /// nothing the device would recognize. A dot in the stem is far commoner than
 /// an exotic deliberate extension.
-fn resolve_extension(out: &Path, removable: bool) -> PathBuf {
+pub(crate) fn resolve_extension(out: &Path, removable: bool) -> PathBuf {
     /// Extensions IODD recognizes; anything else is treated as part of the name.
     const RECOGNIZED: [&str; 5] = ["vhd", "rmd", "vmdk", "ima", "iso"];
 

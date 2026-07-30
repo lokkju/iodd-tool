@@ -76,17 +76,31 @@ fn documented_doctor_flags_are_accepted() {
         .stdout(contains("--iso-max-fragments"));
 }
 
-/// Subcommands not yet built must fail cleanly rather than silently
-/// succeeding. `verify` left this list in phase 2, `retype` in phase 3,
-/// `create` in phase 4, and `doctor` in phase 5.
+/// Every subcommand is implemented as of phase 6, so the NotImplemented
+/// variant should never be reachable from the CLI. If this ever fires, a
+/// command regressed.
 #[test]
-fn unbuilt_subcommands_say_so() {
-    // convert is the last one left; it lands in phase 6.
-    iodd()
-        .args(["convert", "--source", "/tmp/a", "--out", "/tmp/b.vhd"])
-        .assert()
-        .failure()
-        .stderr(contains("not implemented"));
+fn no_subcommand_reports_not_implemented() {
+    for args in [
+        vec!["create", "--size", "16M", "--out", "/nonexistent-zzz/x.vhd"],
+        vec![
+            "convert",
+            "--source",
+            "/nonexistent-zzz.img",
+            "--out",
+            "/tmp/b.vhd",
+        ],
+        vec!["verify", "/nonexistent-zzz"],
+        vec!["doctor", "/nonexistent-zzz"],
+        vec!["retype", "/nonexistent-zzz.vhd", "--to", "removable"],
+    ] {
+        let out = iodd().args(&args).output().expect("run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("not implemented"),
+            "{args:?} still reports not implemented"
+        );
+    }
 }
 
 /// A missing file is a usage error (exit 1), not a structural failure.

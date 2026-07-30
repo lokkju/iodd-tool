@@ -22,6 +22,7 @@ pub mod error;
 pub mod footer;
 pub mod report;
 pub mod size;
+pub mod source;
 
 pub use error::{Error, Result, Run};
 
