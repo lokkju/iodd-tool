@@ -286,6 +286,77 @@ ISO under and over the fragment ceiling, a real VMDK under a `.vmdk` name, and
 codes in default and `--strict` modes, and assert no writes occurred by
 checking mtimes and block counts afterward.
 
+## Hardware acceptance
+
+The final phase, and the only one that tests the actual contract. Every other
+test is a proxy for "the device mounts it"; this phase asks the device.
+
+Test bed as measured: the IODD volume is 256058060800 bytes with 35520352256
+free (87% used), mounted read-only by default. A volume that full almost
+certainly has fragmented free space, which makes it a natural test of both the
+success and the refusal path.
+
+### A. `doctor` against the real corpus, read-only
+
+Runs first, needs no write access, and is the single best regression fixture
+available. Expected grades:
+
+| File | Expected |
+|---|---|
+| `VHDs/Windows_Server_2012R2.rmd` | `MOUNTABLE`, footer `WARN` (GPT header, no `conectix`) |
+| `_ISO/pop-os_24.04_amd64_nvidia_22.iso` | `MOUNTABLE` (3 extents, under the ceiling) |
+| all other measured `.iso` | `MOUNTABLE` (1 extent) |
+
+Assert no writes occurred: mtimes and `st_blocks` unchanged after the run.
+
+### B. Create on the device, then mount through the device
+
+Requires a read-write remount.
+
+1. `create` a small VHD in a dedicated scratch folder.
+2. Confirm our `verify` agrees with `filefrag` and `stat`: one merged run,
+   non-sparse.
+3. Unmount the NTFS volume cleanly, select the file on the IODD, mount it.
+4. Assert the presented block device size equals the file size exactly. This
+   re-confirms F1 against a file we generated rather than one we found.
+5. Partition, format, and write a known file through the device; read it back.
+6. Re-attach the NTFS volume and re-run `filefrag`: still one run. Guest writes
+   arriving through the IODD must not fragment the backing file.
+7. Record whether the footer survived, which feeds issue #1.
+
+### C. Issue #1, resolvable without Windows
+
+Issue #1 currently proposes creating a file with VHD Tool++ on Windows. That is
+unnecessary: our own tool generates footers, so the experiment is to create two
+files, one with a valid footer and one with the footer zeroed, copy both to the
+device without booting either, and see which the device lists and mounts.
+
+That settles whether the footer gates listing, using only this tool and this
+hardware.
+
+### D. The refusal path
+
+At 87% used, a sufficiently large request should fail to find a contiguous run.
+Verify the tool reports the extent map and free-space diagnostics, exits 4, and
+removes the partial file — and that `--keep-on-fail` leaves it in place.
+
+### E. Windows-side check for issue #2 (optional)
+
+The CHS choice in D4 exists for Windows-side tooling, which is the only
+consumer that reads the field. Mounting a generated `.vhd` in Windows Disk
+Management confirms it opens and reports the expected size. This is the only
+part of the phase that needs a Windows install.
+
+### Safety rules
+
+The device holds real data: backups, ISOs, and driver bundles. Therefore:
+
+- Read-only tests (A) run before any read-write remount.
+- All writes go to a dedicated scratch folder.
+- Never pass `--force` against a pre-existing file on the device.
+- Cap test file sizes well below the 33 GiB free.
+- Remount read-write only for the duration, and restore read-only afterward.
+
 ## Deferred
 
 Packaging via cargo-dist lands after the engine is proven. No existing repo of
