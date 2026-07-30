@@ -77,20 +77,16 @@ fn documented_doctor_flags_are_accepted() {
 }
 
 /// Subcommands not yet built must fail cleanly rather than silently
-/// succeeding. `verify` left this list in phase 2, `retype` in phase 3, and
-/// `create` in phase 4.
+/// succeeding. `verify` left this list in phase 2, `retype` in phase 3,
+/// `create` in phase 4, and `doctor` in phase 5.
 #[test]
 fn unbuilt_subcommands_say_so() {
-    for sub in [
-        vec!["convert", "--source", "/tmp/a", "--out", "/tmp/b.vhd"],
-        vec!["doctor", "/tmp"],
-    ] {
-        iodd()
-            .args(&sub)
-            .assert()
-            .failure()
-            .stderr(contains("not implemented"));
-    }
+    // convert is the last one left; it lands in phase 6.
+    iodd()
+        .args(["convert", "--source", "/tmp/a", "--out", "/tmp/b.vhd"])
+        .assert()
+        .failure()
+        .stderr(contains("not implemented"));
 }
 
 /// A missing file is a usage error (exit 1), not a structural failure.

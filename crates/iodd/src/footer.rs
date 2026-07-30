@@ -302,17 +302,23 @@ impl std::fmt::Display for FooterProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadCookie { found } => {
-                let looks_like = if found == b"EFI PART" {
-                    " (this is a GPT backup header; a guest overwrote the footer)"
-                } else if found.starts_with(b"vhdxfile") {
-                    " (this is a VHDX container, which IODD does not mount)"
-                } else {
-                    ""
-                };
+                if found == b"EFI PART" {
+                    return write!(
+                        f,
+                        "no VHD footer: the last sector is a GPT backup header, so a guest \
+                         partitioned this disk and overwrote it"
+                    );
+                }
+                if found.iter().all(|&b| b == 0) {
+                    return write!(f, "no VHD footer: the last sector is all zeros");
+                }
+                if found.starts_with(b"vhdxfile") {
+                    return write!(f, "no VHD footer: this is a VHDX container");
+                }
                 write!(
                     f,
-                    "no conectix cookie, found {:?}{looks_like}",
-                    String::from_utf8_lossy(found)
+                    "no VHD footer: expected the conectix cookie, found {:02x?}",
+                    found
                 )
             }
             Self::BadChecksum { stored, computed } => write!(
@@ -367,7 +373,13 @@ pub fn parse(
     let mut cookie = [0u8; 8];
     cookie.copy_from_slice(&bytes[0..8]);
     if &cookie != COOKIE {
+        // Short-circuit. Without the cookie this is not a footer, so reporting
+        // its "disk type" and "checksum" as separate problems is cascading
+        // noise rather than information — seven findings where one is true.
+        // Every field below is parsed anyway, so a caller can still show what
+        // the bytes said.
         problems.push(FooterProblem::BadCookie { found: cookie });
+        return (read_fields(bytes), problems);
     }
 
     let features = be32(bytes, 8);
@@ -416,13 +428,18 @@ pub fn parse(
         problems.push(FooterProblem::BadChecksum { stored, computed });
     }
 
+    (read_fields(bytes), problems)
+}
+
+/// Read every field as the bytes give it, applying no judgement.
+fn read_fields(bytes: &[u8; FOOTER_SIZE]) -> Footer {
     let mut creator_bytes = [0u8; 4];
     creator_bytes.copy_from_slice(&bytes[28..32]);
     let mut unique_id = [0u8; 16];
     unique_id.copy_from_slice(&bytes[68..84]);
 
-    let footer = Footer {
-        virtual_size: current,
+    Footer {
+        virtual_size: be64(bytes, 48),
         timestamp: be32(bytes, 24),
         creator: Creator(creator_bytes),
         creator_version: be32(bytes, 32),
@@ -432,16 +449,14 @@ pub fn parse(
             heads: bytes[58],
             sectors_per_track: bytes[59],
         },
-        disk_type,
-        checksum: stored,
+        disk_type: be32(bytes, 60),
+        checksum: be32(bytes, 64),
         unique_id,
         saved_state: bytes[84],
-        data_offset,
-        features,
-        format_version,
-    };
-
-    (footer, problems)
+        data_offset: be64(bytes, 16),
+        features: be32(bytes, 8),
+        format_version: be32(bytes, 12),
+    }
 }
 
 fn be32(b: &[u8; FOOTER_SIZE], at: usize) -> u32 {
@@ -776,17 +791,42 @@ mod tests {
         assert!(text.contains("VHDX"), "got: {text}");
     }
 
-    /// A footerless file, which is what the one known-mounting device file
-    /// looks like. Every finding must be reported at once rather than only the
+    /// With a valid cookie, every problem is reported rather than only the
     /// first, so an operator sees the whole picture (design D2).
     #[test]
-    fn reports_every_problem_not_just_the_first() {
-        let b = [0u8; FOOTER_SIZE];
+    fn a_real_footer_reports_every_problem_not_just_the_first() {
+        let mut b = good();
+        b[60..64].copy_from_slice(&3u32.to_be_bytes()); // dynamic
+        b[16..24].copy_from_slice(&512u64.to_be_bytes()); // header-style offset
+        restamp(&mut b);
         let (_, problems) = parse(&b, Some(1_048_576));
         assert!(
-            problems.len() >= 4,
-            "an all-zero footer has several problems, got {problems:?}"
+            problems.len() >= 2,
+            "both problems should surface, got {problems:?}"
         );
+    }
+
+    /// Without a cookie there is no footer, so the fields below it are
+    /// meaningless and reporting each as its own problem is cascading noise.
+    /// This is what the one known-mounting device file looks like.
+    #[test]
+    fn a_footerless_tail_reports_exactly_one_problem() {
+        for tail in [[0u8; FOOTER_SIZE], [0xAAu8; FOOTER_SIZE]] {
+            let (_, problems) = parse(&tail, Some(1_048_576));
+            assert_eq!(problems.len(), 1, "expected one finding, got {problems:?}");
+            assert!(matches!(problems[0], FooterProblem::BadCookie { .. }));
+        }
+    }
+
+    #[test]
+    fn the_footerless_message_names_the_commonest_causes() {
+        let mut gpt = [0u8; FOOTER_SIZE];
+        gpt[0..8].copy_from_slice(b"EFI PART");
+        let (_, p) = parse(&gpt, None);
+        assert!(p[0].to_string().contains("GPT backup header"));
+
+        let (_, p) = parse(&[0u8; FOOTER_SIZE], None);
+        assert!(p[0].to_string().contains("all zeros"));
     }
 
     #[test]
