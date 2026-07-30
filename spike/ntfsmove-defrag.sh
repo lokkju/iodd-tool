@@ -73,7 +73,9 @@ mkdir -p "$MNT"
 
 say "0. environment"
 uname -r
-ntfsmove --version 2>&1 | head -3
+# ntfsmove exits 1 for both --version and --help, so guard the pipeline or
+# set -e/pipefail kills the script before it starts.
+ntfsmove --version 2>&1 | head -3 || true
 echo "image: $IMG_SIZE   target: $ALLOC_SIZE"
 
 say "1. build a volume with fragmented free space"
@@ -101,7 +103,7 @@ sync
 i=0
 for f in "$MNT"/f*.bin; do
     [[ -e "$f" ]] || continue
-    (( i % 2 == 1 )) && rm -f "$f"
+    if (( i % 2 == 1 )); then rm -f "$f"; fi
     i=$((i + 1))
 done
 sync
@@ -132,18 +134,22 @@ say "4. unmount (ntfsmove needs the volume offline)"
 sudo umount "$MNT"
 sync
 
+# Run without a pipe so $? is ntfsmove's own status, not head's.
 say "5. ntfsmove dry run (-n -B)"
 set +e
-ntfsmove -n -B "$IMG" /target.bin 2>&1 | head -30
-echo "   dry-run exit: $?"
+ntfsmove -n -B "$IMG" /target.bin > "$WORKDIR/dry.log" 2>&1
+DRY_RC=$?
 set -e
+head -30 "$WORKDIR/dry.log" | sed 's/^/   /'
+echo "   dry-run exit: $DRY_RC"
 
 say "6. ntfsmove for real (-B)"
 set +e
-ntfsmove -B "$IMG" /target.bin 2>&1 | head -30
+ntfsmove -B "$IMG" /target.bin > "$WORKDIR/move.log" 2>&1
 MOVE_RC=$?
-echo "   exit: $MOVE_RC"
 set -e
+head -30 "$WORKDIR/move.log" | sed 's/^/   /'
+echo "   exit: $MOVE_RC"
 
 say "7. extent map AFTER"
 sudo mount -t ntfs3 -o "loop,uid=$(id -u),gid=$(id -g)" "$IMG" "$MNT"
