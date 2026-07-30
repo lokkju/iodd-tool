@@ -11,7 +11,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use assert_cmd::Command;
-use iodd::extents;
+use ntfs_contig::extents;
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -92,17 +92,20 @@ fn verify_accepts_a_fully_allocated_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = write_file(dir.path(), "good.bin", 512 * 1024);
 
-    Command::cargo_bin("iodd")
+    Command::cargo_bin("ntfs-contig")
         .expect("binary")
         .args(["verify", &path.to_string_lossy()])
         .assert()
         .success();
 }
 
-/// Exit 5 is the sparseness gate. It fires with or without `--strict`, because
-/// the device rejects such a file regardless of our flags (design D3).
+/// Exit 5 is the sparseness gate.
+///
+/// The `--strict` half of this lives in the iodd tests: `--strict` is an iodd
+/// flag governing *footer* findings, and the point there is that it does not
+/// change the hard gates. The engine has no such flag, only `--report-only`.
 #[test]
-fn verify_rejects_a_sparse_file_with_or_without_strict() {
+fn verify_rejects_a_sparse_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("sparse.bin");
 
@@ -117,16 +120,58 @@ fn verify_rejects_a_sparse_file_with_or_without_strict() {
         return;
     }
 
-    for args in [
-        vec!["verify", &*path.to_string_lossy()],
-        vec!["verify", &*path.to_string_lossy(), "--strict"],
+    Command::cargo_bin("ntfs-contig")
+        .expect("binary")
+        .args(["verify", &path.to_string_lossy()])
+        .assert()
+        .code(5);
+}
+
+/// `--report-only` is the engine's escape hatch for auditing: report the facts,
+/// never fail on them. Useful when scanning a volume where fragmentation is
+/// expected and you want the numbers rather than an exit code.
+#[test]
+fn report_only_never_fails() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sparse2.bin");
+
+    let f = File::create(&path).expect("create");
+    f.set_len(8 * 1024 * 1024).expect("truncate");
+    f.sync_all().expect("sync");
+    drop(f);
+
+    Command::cargo_bin("ntfs-contig")
+        .expect("binary")
+        .args(["verify", &path.to_string_lossy(), "--report-only"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn json_output_is_parseable_and_stable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_file(dir.path(), "j.bin", 128 * 1024);
+
+    let out = Command::cargo_bin("ntfs-contig")
+        .expect("binary")
+        .args(["verify", &path.to_string_lossy(), "--json"])
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    for field in [
+        "\"path\"",
+        "\"size\"",
+        "\"allocated\"",
+        "\"sparse\"",
+        "\"merged_runs\"",
+        "\"contiguous\"",
+        "\"any_unwritten\"",
+        "\"runs\"",
     ] {
-        Command::cargo_bin("iodd")
-            .expect("binary")
-            .args(&args)
-            .assert()
-            .code(5);
+        assert!(text.contains(field), "missing {field} in: {text}");
     }
+    assert!(text.starts_with('['), "must be a JSON array");
 }
 
 /// The Rust port must agree with `spike/fiemap.py`, which was validated
