@@ -232,6 +232,68 @@ enough for the 1 GiB target, so nothing hit ENOSPC, but the free space came in
 ~242 MiB chunks and every strategy produced 5 runs. The tool must refuse there
 rather than emit a file the device will not mount.
 
+## S8. Survey: is there any Linux-native NTFS defragmenter?
+
+D8 says the tool verifies contiguity rather than producing it. That rests on
+an assumption worth checking: that no Linux tool can relocate NTFS clusters.
+
+### Does not exist
+
+- **`ntfsdefrag`.** Search results claim it ships with ntfsprogs. It does not.
+  It is absent from ntfs-3g, from this system, and from the upstream
+  `ntfsprogs` man page.
+- **A kernel move-extent ioctl for NTFS.** ext4 has `EXT4_IOC_MOVE_EXT`, which
+  is what `e4defrag` drives; XFS and btrfs have their own. ntfs3 has no
+  equivalent. Linux 6.19 adds `NTFS3_IOC_SHUTDOWN`, nothing for relocation. So
+  an `e4defrag` equivalent is not merely missing, it is not currently
+  implementable without kernel work.
+
+### Exists, but dubious
+
+- **`ntfsmove`**, in ntfs-3g. Copyright 2003, Richard Russon, still shipping
+  as of 2022.10.3. It has exactly the right primitives: `-B` best place, `-C`
+  specific cluster, `-S`/`-E` start and end, `-n` dry run.
+
+  Against it: it takes a **device**, so the volume must be unmounted; it marks
+  the volume dirty unless `-D`, meaning Windows `chkdsk` afterwards; it has no
+  man page in this distribution; and the upstream `ntfsprogs` documentation
+  does not list it among the suite's tools. That combination suggests it was
+  never finished.
+
+  **Untested.** `spike/ntfsmove-defrag.sh` builds a fragmented file on a
+  scratch volume and measures whether `ntfsmove -B` consolidates it, destroys
+  it, or does nothing.
+
+- **UltraDefrag4Linux**, a port of the Windows tool. 13 commits; the
+  maintainer states "At this moment I am unable to render support to this
+  project."
+
+### Irrelevant, given S7
+
+Rewrite-and-hope defragmenters such as `shake` work by copying a file and
+letting the allocator do better on the second attempt. S7 measured that ntfs3
+places blocks identically however the request arrives, so a userspace
+rewriter cannot help here by construction. We already ran that experiment
+without meaning to.
+
+### Community consensus
+
+Copy the data off, reformat, copy it back. Or use Windows.
+
+### Aside
+
+There is an active LKML effort ("ntfsplus", posted as an "ntfs filesystem
+remake") to replace ntfs3, on the stated grounds that ntfs3 "has many problems
+and is poorly maintained." Worth watching; changes nothing today.
+
+### Bearing on the design
+
+Unless `ntfsmove` surprises us, D8 stands and the survey strengthens rather
+than weakens it: the tool cannot defragment because on Linux nothing can.
+Even if `ntfsmove` works, the offline-volume and dirty-volume requirements
+make it unsuitable as a default code path, and at most an opt-in with loud
+warnings.
+
 ## S4. Incidental confirmations
 
 - `fallocate(2)` mode 0 succeeds on ntfs3. It does not return `EOPNOTSUPP`, so
