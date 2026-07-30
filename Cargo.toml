@@ -1,0 +1,50 @@
+[package]
+name = "iodd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Polyform-Shield-1.0.0"
+description = "Create, convert, and verify contiguous fixed-size VHD/RMD virtual disks for IODD hardware devices"
+repository = "https://github.com/lokkju/iodd-tool"
+readme = "README.md"
+keywords = ["iodd", "vhd", "ntfs", "virtual-disk"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors. Deliberately no anyhow: SPEC.md line 185 lists it, but the whole
+# point of error.rs is one enum whose variants carry exit codes, and anyhow
+# erases the variant.
+thiserror = "2"
+
+# Raw syscalls, ioctls, and #[repr(C)] structs
+libc = "0.2"
+nix = { version = "0.29", features = ["fs"] }
+
+# Footer GUID
+uuid = { version = "1", features = ["v4"] }
+
+# doctor output
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[features]
+# Integration tests that need sudo and a loopback NTFS volume. Off by default
+# so `cargo test` stays clean on a dev box and in CI.
+ntfs-integration = []
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

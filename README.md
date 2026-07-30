@@ -3,8 +3,11 @@
 A Linux command-line tool for creating, converting, and verifying fixed-size
 virtual disk files for IODD hardware devices (Mini, ST400, 2531/2541, LK100).
 
-**Status: pre-implementation.** The format model has been validated against a
-physical device and the design is settled. No code yet.
+**Status: in development.** The format model has been validated against a
+physical device, the design is settled, and the CLI surface exists. No
+subcommand does anything yet — see
+[the implementation plan](docs/superpowers/plans/2026-07-29-iodd-implementation-plan.md)
+for the phase order.
 
 ## Why
 
