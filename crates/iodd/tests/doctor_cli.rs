@@ -304,8 +304,11 @@ fn the_summary_counts_by_verdict() {
         .assert()
         .success()
         .stdout(contains("2 file(s):"))
-        .stdout(contains("mountable"))
-        .stdout(contains("warn"));
+        // A warned file still mounts, so the count of things that will mount
+        // includes it; the warning is the parenthetical.
+        .stdout(contains("2 will mount"))
+        .stdout(contains("1 with warnings"))
+        .stdout(contains("0 will not"));
 }
 
 /// The vendor documents a 32-item limit per directory containing images.
