@@ -34,6 +34,31 @@ would act. That is harder to reason about, not easier.
 Szakacsits founded Tuxera, so his share may have been assigned, but the
 notices do not say so and no assignment could be verified.
 
+### And it is not dual-licensing
+
+A follow-up check found that Tuxera does not dual-license ntfs-3g, and could
+not: there is no CLA or assignment agreement in the repository at all. The
+only governance file is `AUTHORS`, which is attribution. True dual-licensing
+(MySQL, Qt) requires the vendor to own the whole copyright, normally via a CLA
+that assigns it or grants a broad relicensing right.
+
+The commercial product, "Microsoft NTFS by Tuxera", is a separate proprietary
+embedded implementation sold to OEMs — advertised as up to six times faster,
+with patented enhancements. It is not ntfs-3g under another licence.
+
+So the arrangement is two products from one company: a GPL project Tuxera
+maintains but does not own, and a proprietary product it wrote and does own.
+
+This **weakens** the commercial-incentive argument above. Under true
+dual-licensing, enforcement directly sells a licence to the same code, which
+is a tight feedback loop. Here it could at best nudge a prospect toward a
+different product. The incentive is diffuse rather than sharp.
+
+The general trap is worth naming: "community edition plus commercial edition"
+reads like dual-licensing but frequently is not. Open core, true
+dual-licensing, and two-codebases-one-brand have quite different consequences,
+and vendors rarely say which they are running.
+
 ## Confirmed: no LGPL escape hatch
 
 The `README` is explicit that the drivers, the ntfsprogs utilities **and
