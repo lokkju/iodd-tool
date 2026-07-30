@@ -13,19 +13,51 @@ enclosure, NTFS volume labelled `iodd`, mounted read-only via `ntfs3`) and
 against `qemu-img` 8.2.2 on the development host. They are recorded here
 because several of them contradict `SPEC.md`.
 
-### F1. The device exposes the entire file as the virtual disk
+### F1. RETRACTED — the device does not simply expose the whole file
 
-`VHDs/Windows_Server_2012R2.rmd` is 42949673472 bytes. Mounted through the
-IODD, it presents as `/dev/sda` of **42949673472 bytes** — byte-identical to
-the file size.
+**Original claim, now known to be wrong:** that the IODD presents the entire
+file, footer included, as the virtual disk.
 
-The 512-byte footer region is therefore *inside* the guest-visible disk, not
-excluded from it. `SPEC.md` lines 21-24 model the guest-visible region as
-`virtual_size` with the footer outside it. That is wrong.
+That came from measuring exactly one file —
+`VHDs/Windows_Server_2012R2.rmd`, 42949673472 bytes, presented as a
+42949673472-byte `/dev/sda`. The arithmetic was right; generalising from it
+was not. It was the only `.rmd` on the volume and the only file without a
+valid footer, so it was the worst possible single sample.
 
-Consequence: a guest that partitions the disk with GPT writes its backup GPT
-header into the last sector, which is the footer. The footer does not survive
-first use.
+Hardware acceptance, measured 2026-07-30 with files this tool created:
+
+| File | Ext | Footer | File size | Presented |
+|---|---|---|---|---|
+| `item-b.vhd` | `.vhd` | valid | 1073742336 | **1073741824** = file − 512 |
+| `item-c-nofooter.vhd` | `.vhd` | **zeroed** | 67109376 | **67108864** = file − 512 |
+| `Windows_Server_2012R2.rmd` | `.rmd` | none | 42949673472 | 42949673472 = whole file |
+
+Confirmed by `/sys/block/sda/size` and `lsblk -b` independently.
+
+**Two hypotheses are dead.** The device does not always present the whole
+file, and it does not decide by reading the footer — a `.vhd` with its footer
+zeroed is trimmed by 512 just the same as one with a valid footer.
+
+**What is established:**
+
+- A `.vhd` is presented as **file size minus 512**, whatever the footer says or
+  whether there is one at all. The device evidently assumes the fixed-VHD
+  layout from the extension.
+- Footer validity affects neither the presented size nor listing (see F2).
+- Therefore `--size 20G` gives a guest a disk of exactly 20 GiB, not the
+  odd 20 GiB + 512 previously stated here. D1 is correct and cleaner than
+  described.
+
+**What is not yet established:** whether the `.rmd` reading is caused by the
+extension or by something particular to that file. The obvious test is to
+`retype` a known `.vhd` to `.rmd` — same bytes, same inode, only the extension
+changing — and see which size the device presents. Until that runs, "`.rmd` is
+presented whole" rests on one file.
+
+If the extension does decide it, then `SPEC.md` lines 26-28 are wrong: `.vhd`
+and `.rmd` would not be byte-identical formats, and `retype` would not be the
+zero-cost rename it claims to be, since it would shift the guest-visible size
+by 512 bytes.
 
 ### F2. A valid VHD footer is not required to mount
 
