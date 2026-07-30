@@ -93,8 +93,18 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     // ---- 2. early extent check --------------------------------------------
     // Before any data is written, so a doomed target costs nothing.
-    if outcome == AllocOutcome::Reserved {
-        alloc::require_contiguous(target.file(), total_size, target.path())?;
+    if outcome == AllocOutcome::Reserved
+        && let Err(e) = alloc::require_contiguous(target.file(), total_size, target.path())
+    {
+        // Release our own reservation *before* measuring. Otherwise the failed
+        // allocation is still holding the space, and both the free-space figure
+        // and the largest-run probe come back short by exactly the size we are
+        // about to give back — which is precisely the number the operator is
+        // trying to learn.
+        let kept = args.keep_on_fail;
+        drop(target);
+        report_refusal(&e, dir, total_size, kept);
+        return Err(e.into());
     }
 
     // ---- 3. zero, if asked -------------------------------------------------
@@ -153,6 +163,68 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
     }
 
     Ok(0)
+}
+
+/// Explain a refusal in terms an operator can act on.
+///
+/// `SPEC.md` line 162 asks for the extent map, the file size, and the largest
+/// contiguous free run. The first two we have; the third we measure, since an
+/// unzeroed allocation is cheap enough to probe for (design D9's unintended
+/// dividend). Knowing that 8 GiB would fit is far more use than being told
+/// 12 GiB will not.
+fn report_refusal(err: &ntfs_contig::Error, dir: &Path, requested: u64, kept: bool) {
+    let ntfs_contig::Error::Fragmented { runs, .. } = err else {
+        return;
+    };
+
+    eprintln!();
+    eprintln!(
+        "iodd: {} could not be allocated in one extent. It came back as {}:",
+        size::humanize(requested),
+        runs.len()
+    );
+    for (i, run) in runs.iter().take(8).enumerate() {
+        eprintln!(
+            "iodd:   run {i}: physical={} length={}",
+            run.physical,
+            size::humanize(run.length)
+        );
+    }
+    if runs.len() > 8 {
+        eprintln!("iodd:   ... and {} more", runs.len() - 8);
+    }
+
+    if kept {
+        eprintln!(
+            "iodd: note: --keep-on-fail is retaining the partial file, so the \
+             figures below exclude the space it still holds."
+        );
+    }
+
+    if let Some(free) = fsinfo::free_space(dir) {
+        eprintln!("iodd: free space on this volume: {}", size::humanize(free));
+    }
+
+    eprint!("iodd: measuring the largest contiguous run available... ");
+    match alloc::probe_largest_contiguous(dir, requested, 64 * 1024 * 1024) {
+        Some(best) => {
+            eprintln!("{}", size::humanize(best));
+            eprintln!(
+                "iodd: a target of {} or less should succeed right now.",
+                size::humanize(best)
+            );
+        }
+        None => eprintln!("nothing usable"),
+    }
+
+    eprintln!(
+        "iodd: nothing on Linux can relocate NTFS clusters, so this cannot be \
+         repaired here."
+    );
+    eprintln!(
+        "iodd: consolidate free space on Windows (built-in defrag, or Sysinternals \
+         Contig on one file), or use a volume with a larger contiguous free run."
+    );
 }
 
 /// Apply the default extension, and warn when an explicit one contradicts
