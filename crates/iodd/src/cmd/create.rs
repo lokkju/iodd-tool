@@ -40,9 +40,25 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     let creator = Creator::parse(&args.creator).map_err(Error::Usage)?;
     let out = resolve_extension(&args.out, args.removable);
-    let total_size = virtual_size
-        .checked_add(u64::try_from(crate::footer::FOOTER_SIZE).unwrap_or(512))
-        .ok_or_else(|| Error::Usage("size + 512 overflows a 64-bit byte count".into()))?;
+
+    // Measured on hardware: the device decides by extension. A `.vhd` is
+    // presented as file size minus 512, on the assumption that the last sector
+    // is a footer; a `.rmd` is presented whole. So a removable image is a raw
+    // image of exactly the requested size and carries no footer, matching the
+    // `.ima` files the device itself ships. Giving it a footer would hand the
+    // guest 512 bytes of it as trailing disk. See design F1 and D10.
+    let raw = out
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("rmd"));
+
+    let total_size = if raw {
+        virtual_size
+    } else {
+        virtual_size
+            .checked_add(u64::try_from(crate::footer::FOOTER_SIZE).unwrap_or(512))
+            .ok_or_else(|| Error::Usage("size + 512 overflows a 64-bit byte count".into()))?
+    };
 
     if out.exists() && !args.force {
         return Err(Error::TargetExists { path: out });
@@ -69,12 +85,21 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
         });
     }
 
-    println!(
-        "creating {} ({} virtual + 512 footer = {} bytes)",
-        out.display(),
-        size::humanize(virtual_size),
-        total_size
-    );
+    if raw {
+        println!(
+            "creating {} (raw removable image, {} = {} bytes, no footer)",
+            out.display(),
+            size::humanize(virtual_size),
+            total_size
+        );
+    } else {
+        println!(
+            "creating {} ({} virtual + 512 footer = {} bytes)",
+            out.display(),
+            size::humanize(virtual_size),
+            total_size
+        );
+    }
 
     // ---- 1. reserve --------------------------------------------------------
     let target = TempTarget::create(&out, args.keep_on_fail)?;
@@ -122,9 +147,11 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
     // ---- 4. post-write checks ---------------------------------------------
     alloc::verify_written(target.file(), total_size, target.path(), zeroed)?;
 
-    // ---- 5. footer in place ------------------------------------------------
-    let footer = Footer::now(virtual_size, creator);
-    target.write_at(&footer.to_bytes(), virtual_size)?;
+    // ---- 5. footer in place, unless this is a raw removable image ---------
+    let footer = (!raw).then(|| Footer::now(virtual_size, creator));
+    if let Some(f) = &footer {
+        target.write_at(&f.to_bytes(), virtual_size)?;
+    }
 
     // ---- 6. re-verify, then publish ---------------------------------------
     alloc::require_contiguous(target.file(), total_size, target.path())?;
@@ -137,13 +164,18 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     target.finalize(args.force)?;
 
-    println!(
-        "  geometry      {}/{}/{}",
-        footer.geometry.cylinders, footer.geometry.heads, footer.geometry.sectors_per_track
-    );
-    println!("  creator       {creator}");
+    if let Some(f) = &footer {
+        println!(
+            "  geometry      {}/{}/{}",
+            f.geometry.cylinders, f.geometry.heads, f.geometry.sectors_per_track
+        );
+        println!("  creator       {creator}");
+    } else {
+        println!("  footer        none (raw removable image)");
+    }
     println!("  contiguous    yes (1 extent)");
     println!("  zeroed        {}", if zeroed { "yes" } else { "no" });
+    println!("  guest sees    {}", size::humanize(virtual_size));
     println!("{} created", out.display());
 
     if !zeroed {

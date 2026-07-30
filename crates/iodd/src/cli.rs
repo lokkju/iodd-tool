@@ -157,6 +157,13 @@ pub struct RetypeArgs {
     /// Target presentation
     #[arg(long, value_enum)]
     pub to: Presentation,
+
+    /// Allow a conversion that hides bytes from the guest.
+    ///
+    /// Only needed for .rmd to .vhd, which takes the final 512 bytes out of the
+    /// guest-visible disk.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -245,6 +245,7 @@ statement is correct.
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
 | D5 | ~~Zeroing is mandatory~~ **Superseded by D9** | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
+| D10 | **`.vhd` and `.rmd` are different formats.** `create --removable` writes a raw image of exactly `virtual_size` with no footer; `retype` converts rather than renaming | Measured: the device presents `.vhd` as file − 512 and `.rmd` whole, decided by extension. See F1. |
 | D9 | **Zeroing is off by default, with a loud warning; `--zero` opts in** | Analysis of VHD Tool++ showed the official tool does not zero either — it uses `SetFileValidData`, whose whole purpose is to skip the write. Instant creation is the point of the tool, and matching vendor behaviour matters more than being quietly slower and differently-behaved. See `spike/VHD-TOOL-PLUSPLUS.md` V1. |
 | D7 | **There is no allocation strategy.** Resolved in the negative | All three strategies produce byte-identical extent layouts. ntfs3's allocator cannot be steered from userspace. See `spike/FINDINGS.md` S7. |
 | D8 | The tool verifies contiguity; it does not produce it | Follows from D7. `fallocate` is retained as a cheap early abort, not as an allocation technique. |
