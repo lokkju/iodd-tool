@@ -1,0 +1,6 @@
+# The crate denies unwrap/expect/panic so the write path can never abort on a
+# device holding real data. Tests are exempt: a panicking assertion is the
+# point there.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
