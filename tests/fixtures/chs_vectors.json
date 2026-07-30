@@ -1,0 +1,109 @@
+{
+  "_comment": [
+    "Golden CHS vectors harvested from qemu-img. DO NOT derive these from",
+    "the SPEC.md pseudocode; that would be circular. Regenerate with",
+    "spike/harvest-chs-vectors.sh.",
+    "",
+    "Keyed on the footer's own Original Size, NOT on the requested size.",
+    "Without force_size qemu grows the sector count until the CHS product",
+    "covers it, so a requested size and the footer's size differ. Assert",
+    "chs(total_sectors) == (cylinders, heads, sectors_per_track).",
+    "",
+    "The cap branch (> 65535*16*255 sectors) is absent because qemu-img",
+    "refuses vpc images above ~127.9 GiB. It is asserted by hand."
+  ],
+  "qemu_version": "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.17)",
+  "command": "qemu-img create -f vpc -o subformat=fixed <path> <size>",
+  "vectors": [
+    {
+      "requested": "100M",
+      "original_size": 104865792,
+      "total_sectors": 204816,
+      "cylinders": 1004,
+      "heads": 12,
+      "sectors_per_track": 17,
+      "product_sectors": 204816,
+      "checksum": 4294960495
+    },
+    {
+      "requested": "102M",
+      "original_size": 107041792,
+      "total_sectors": 209066,
+      "cylinders": 946,
+      "heads": 13,
+      "sectors_per_track": 17,
+      "product_sectors": 209066,
+      "checksum": 4294960243
+    },
+    {
+      "requested": "200M",
+      "original_size": 209764352,
+      "total_sectors": 409696,
+      "cylinders": 826,
+      "heads": 16,
+      "sectors_per_track": 31,
+      "product_sectors": 409696,
+      "checksum": 4294960194
+    },
+    {
+      "requested": "300M",
+      "original_size": 314818560,
+      "total_sectors": 614880,
+      "cylinders": 610,
+      "heads": 16,
+      "sectors_per_track": 63,
+      "product_sectors": 614880,
+      "checksum": 4294960171
+    },
+    {
+      "requested": "500M",
+      "original_size": 524353536,
+      "total_sectors": 1024128,
+      "cylinders": 1016,
+      "heads": 16,
+      "sectors_per_track": 63,
+      "product_sectors": 1024128,
+      "checksum": 4294960642
+    },
+    {
+      "requested": "1G",
+      "original_size": 1073995776,
+      "total_sectors": 2097648,
+      "cylinders": 2081,
+      "heads": 16,
+      "sectors_per_track": 63,
+      "product_sectors": 2097648,
+      "checksum": 4294960287
+    },
+    {
+      "requested": "8G",
+      "original_size": 8590417920,
+      "total_sectors": 16778160,
+      "cylinders": 16645,
+      "heads": 16,
+      "sectors_per_track": 63,
+      "product_sectors": 16778160,
+      "checksum": 4294960928
+    },
+    {
+      "requested": "32G",
+      "original_size": 34361303040,
+      "total_sectors": 67111920,
+      "cylinders": 16449,
+      "heads": 16,
+      "sectors_per_track": 255,
+      "product_sectors": 67111920,
+      "checksum": 4294960427
+    },
+    {
+      "requested": "127G",
+      "original_size": 136365219840,
+      "total_sectors": 266338320,
+      "cylinders": 65279,
+      "heads": 16,
+      "sectors_per_track": 255,
+      "product_sectors": 266338320,
+      "checksum": 4294959685
+    }
+  ]
+}

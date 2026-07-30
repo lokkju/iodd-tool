@@ -10,3 +10,6 @@
 *.img
 *.iso
 !tests/fixtures/**
+
+# third-party binaries under examination; never committed
+/scratch/

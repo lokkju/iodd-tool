@@ -182,7 +182,8 @@ statement is correct.
 | D2 | Footer problems are `WARN`, never `WILL-NOT-MOUNT` | F1, F2. Hard-gating reports a known-working file as broken. |
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
-| D5 | **Zeroing is mandatory.** Resolved by measurement | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
+| D5 | ~~Zeroing is mandatory~~ **Superseded by D9** | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
+| D9 | **Zeroing is off by default, with a loud warning; `--zero` opts in** | Analysis of VHD Tool++ showed the official tool does not zero either — it uses `SetFileValidData`, whose whole purpose is to skip the write. Instant creation is the point of the tool, and matching vendor behaviour matters more than being quietly slower and differently-behaved. See `spike/VHD-TOOL-PLUSPLUS.md` V1. |
 | D7 | **There is no allocation strategy.** Resolved in the negative | All three strategies produce byte-identical extent layouts. ntfs3's allocator cannot be steered from userspace. See `spike/FINDINGS.md` S7. |
 | D8 | The tool verifies contiguity; it does not produce it | Follows from D7. `fallocate` is retained as a cheap early abort, not as an allocation technique. |
 | D6 | Contiguity engine built and proven first | Highest-risk component; everything else depends on it. |
@@ -342,9 +343,14 @@ instant, cheap way to fail before doing expensive work.
    ENOSPC.
 2. FIEMAP bounded to the file size, merged into runs. **More than one run
    aborts here**, before any data is written. On a 20 GiB target this saves
-   the entire ~40 second zeroing pass on the failure path.
-3. One run: write zeros across the data region. Mandatory per S1. Measured at
-   roughly 500 MB/s.
+   the entire zeroing pass on the failure path when `--zero` was given.
+3. **Only with `--zero`:** write zeros across the whole `virtual_size + 512`.
+   Measured at roughly 500 MB/s, so about 40 s for 20 GiB.
+
+   Without it, the data region keeps whatever was on those clusters, exactly
+   as `VhdTool.exe /create` leaves it (D9). `create` prints a warning saying
+   so. The `UNWRITTEN` recheck in step 4 is therefore informational rather
+   than a gate unless `--zero` was requested.
 4. FIEMAP again: confirm still one run, and that `UNWRITTEN` has cleared
    per S6.
 5. Write the footer in place at `virtual_size` with a seek-and-write, no
