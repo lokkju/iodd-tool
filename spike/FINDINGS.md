@@ -163,6 +163,75 @@ one ioctl rather than by reading the file back.
 Throughput was roughly 500 MB/s for the 1 GiB writes, putting a 20 GiB create
 around 40 seconds. Acceptable for a mandatory zeroing pass.
 
+## S7. Allocation strategy is irrelevant. Resolves D7.
+
+Third run, all three strategies against two realistic scenarios.
+
+**dirty** (filled to ENOSPC, then emptied):
+
+```
+   fallocate       2 RUNS   unwritten=True   0s
+   seqwrite        2 RUNS   unwritten=False  1s
+   fallocate_write 2 RUNS   unwritten=False  1s
+
+   every one of them:
+        run 0: physical=5382144     length=531501056
+        run 1: physical=2168954880  length=542240768
+```
+
+**fragmented** (16 files written, every other one deleted):
+
+```
+   fallocate       5 RUNS   unwritten=True   0s
+   seqwrite        5 RUNS   unwritten=False  1s
+   fallocate_write 5 RUNS   unwritten=False  1s
+
+   every one of them:
+        run 0: physical=190513152   length=78528512
+        run 1: physical=694775808   length=253706240
+        run 2: physical=1202188288  length=253706240
+        run 3: physical=1709600768  length=253706240
+        run 4: physical=2422661120  length=234094592
+```
+
+The layouts are not merely the same length. They are **byte-identical**: same
+physical offsets, same run lengths, across all three strategies in both
+scenarios.
+
+**Conclusion: there is no allocation strategy to choose.** ntfs3's allocator
+places blocks identically whether the request arrives as `fallocate(2)` or as
+sequential writes. Userspace cannot steer it.
+
+This resolves D7 in the negative and settles the tool's honest claim: it
+cannot *produce* contiguity, it can only *verify* it and refuse. Where a
+volume's free space permits a single run, any approach gets one; where it does
+not, no approach does.
+
+Measured on kernel 6.8.0-124, ntfs3, one 4 GiB volume geometry, two scenarios.
+
+### The consequence for the engine
+
+Since layout is strategy-independent, the choice falls to other criteria, and
+`fallocate` earns its place as a **cheap early abort** rather than as an
+allocation technique:
+
+1. `fallocate(2)` the full size. Instant (0s measured), fails fast on ENOSPC.
+2. FIEMAP, merged. **If more than one run, abort here** — before writing
+   anything. On a 20 GiB target this saves the entire ~40 second zeroing pass
+   on the failure path.
+3. One run: write zeros across the data region. Mandatory per S1.
+4. FIEMAP again: still one run, and `UNWRITTEN` cleared per S6.
+5. Write the footer in place at `virtual_size`.
+6. Final verify.
+
+Step 3 not relocating the file is confirmed by the `fallocate_write` rows
+above, which match `fallocate` alone exactly.
+
+The fragmented scenario also validates the refusal path: 2.1 GiB free was
+enough for the 1 GiB target, so nothing hit ENOSPC, but the free space came in
+~242 MiB chunks and every strategy produced 5 runs. The tool must refuse there
+rather than emit a file the device will not mount.
+
 ## S4. Incidental confirmations
 
 - `fallocate(2)` mode 0 succeeds on ntfs3. It does not return `EOPNOTSUPP`, so

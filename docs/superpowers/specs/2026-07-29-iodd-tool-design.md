@@ -155,7 +155,8 @@ statement is correct.
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
 | D5 | **Zeroing is mandatory.** Resolved by measurement | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
-| D7 | Allocation needs a strategy, not one syscall | Phase 0 found `fallocate` splits a 1 GiB file into two runs on an *empty* volume. See `spike/FINDINGS.md` S2. |
+| D7 | **There is no allocation strategy.** Resolved in the negative | All three strategies produce byte-identical extent layouts. ntfs3's allocator cannot be steered from userspace. See `spike/FINDINGS.md` S7. |
+| D8 | The tool verifies contiguity; it does not produce it | Follows from D7. `fallocate` is retained as a cheap early abort, not as an allocation technique. |
 | D6 | Contiguity engine built and proven first | Highest-risk component; everything else depends on it. |
 
 D2 and D4 are provisional and tracked as issues. D2 should be revisited once a
@@ -303,20 +304,45 @@ The IODD device has its own NTFS reader in firmware and is not ntfs3. The
 inference that a guest would observe the stale bytes is deferred to hardware
 acceptance.
 
-### Follow-up: allocation strategy
+### The allocation sequence
+
+Settled by S7. Since the extent layout is identical whatever the strategy,
+`fallocate` is kept for a different reason than the spec assumed: it is an
+instant, cheap way to fail before doing expensive work.
+
+1. `fallocate(2)` the full `virtual_size + 512`. Instant, and fails fast on
+   ENOSPC.
+2. FIEMAP bounded to the file size, merged into runs. **More than one run
+   aborts here**, before any data is written. On a 20 GiB target this saves
+   the entire ~40 second zeroing pass on the failure path.
+3. One run: write zeros across the data region. Mandatory per S1. Measured at
+   roughly 500 MB/s.
+4. FIEMAP again: confirm still one run, and that `UNWRITTEN` has cleared
+   per S6.
+5. Write the footer in place at `virtual_size` with a seek-and-write, no
+   truncation and no extension of length.
+6. Final verify: footer readable, checksum valid, run count unchanged.
+
+Writing into a `fallocate`d file does not relocate it; the `fallocate+write`
+measurements match `fallocate` alone byte for byte.
+
+### Superseded: the allocation strategy follow-up
 
 `spike/allocation-strategy.sh` compares three strategies on freshly formatted
 volumes: one `fallocate` call, a sequential zero write with no `fallocate`,
 and `fallocate` followed by an overwrite.
 
-The hypothesis worth testing is that S1 and S2 cancel out. Zeroing is
-mandatory per S1, so if a sequential write lands contiguously where
-`fallocate` does not, then a single pass both allocates and zeroes and the
-zeroing requirement costs nothing beyond the write we already owe.
+The hypothesis was that a sequential write might land contiguously where
+`fallocate` does not, making the mandatory zeroing free.
 
-If neither strategy is reliably contiguous, allocation on ntfs3 cannot be
-steered from userspace, and the tool's honest position is to verify and refuse
-with diagnostics rather than to promise contiguity it cannot deliver.
+It did not. `spike/allocation-dirty-volume.sh` measured all three strategies
+against a filled-then-emptied volume and against one with deliberately
+fragmented free space, and the extent layouts came back byte-identical every
+time. The second half of the original prediction is the one that held:
+allocation on ntfs3 cannot be steered from userspace, so the tool verifies and
+refuses rather than promising contiguity it cannot deliver.
+
+Both scripts are retained for reproducibility.
 
 ## Testing
 

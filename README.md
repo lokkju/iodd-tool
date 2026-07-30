@@ -20,8 +20,17 @@ substitute, `qemu-img create -f vpc -o subformat=fixed`, fails both properties:
 it truncates any pre-allocated target and writes the data region sparse. On a
 100 MiB image it leaves 16 blocks allocated out of 104858112 bytes.
 
-This tool produces a fully-allocated, verified-contiguous file directly on
-Linux, with no Windows round-trip.
+This tool fully allocates and zeroes the file, verifies that it landed in a
+single extent, and refuses to hand you one that did not. No Windows
+round-trip.
+
+**What it cannot do:** make a fragmented file contiguous. Measurement showed
+ntfs3's allocator places blocks identically whether you `fallocate` or write
+sequentially, so there is no userspace lever on placement. Where a volume's
+free space allows a single run you get one; where it does not, no tool running
+on Linux can change that, and this one tells you so instead of emitting a file
+the device will silently refuse to mount. Consolidating free space remains a
+Windows-side job.
 
 ## Planned commands
 
