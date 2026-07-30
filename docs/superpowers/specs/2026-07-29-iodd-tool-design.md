@@ -55,27 +55,46 @@ So the claim is narrow but clean: a file with no valid VHD footer mounted.
 Whether the footer matters *before* a guest has overwritten it is untested and
 is tracked as issue #1.
 
-### F3. Naive FIEMAP extent counting rejects working files
+### F3. The FIEMAP query must be bounded to the file size
 
-`filefrag -v` on the working `.rmd`:
+**Corrected 2026-07-29.** An earlier version of this finding claimed ntfs3
+returns two records for a contiguous file and that counting
+`fm_mapped_extents` would therefore reject working files. That was wrong, and
+prototyping the ioctl caught it. The corrected finding is narrower but still
+an implementation requirement.
+
+`filefrag -v -b512` on the working `.rmd` shows two records:
 
 ```
-ext: logical_offset:      physical_offset: length:    flags:
-  0:      0..10485760:  49574310..60060070: 10485760: merged,eof
-  1: 10485760..10485760: 60060070..60060070:       0: last,unwritten,merged,eof
-: 1 extent found
+ext: logical_offset:        physical_offset:        length:  flags:
+  0:      0..83886080:  396594480..480480560:  83886081:  merged,eof
+  1: 83886081..83886087: 480480561..480480567:         7:  last,unwritten,merged,eof
 ```
 
-Two FIEMAP records. They are physically adjacent: 49574310 + 10485760 =
-60060070 exactly. `filefrag` reports **1 extent** because it merges adjacent
-records; the trailing record is a zero-length EOF marker for the partial final
-cluster.
+Record 0 is 83886081 sectors = 42949673472 bytes: the entire file. Record 1
+starts at sector 83886081, which is **past end-of-file**, and covers 7 sectors
+= 3584 bytes. That is exactly the slack in the final 4096-byte cluster
+(4096 - 512 = 3584). It is cluster tail, not file data.
 
-`SPEC.md` line 158 says to read `fm_mapped_extents` and treat 1 as contiguous.
-That yields **2** for this file and would report a demonstrably working file as
-fragmented.
+Issuing the ioctl directly with `fm_length` bounded to the file size returns
+**one** record for this file:
 
-The engine must merge physically adjacent records into runs and count runs.
+```
+logical=0  physical=203056373760  length=42949673472  flags=last,merged
+```
+
+So the requirement is: **bound `fm_length` to the file size.** Query past EOF,
+as `filefrag` does, and the cluster slack appears as an extra `unwritten`
+record that would inflate the extent count.
+
+Merging physically adjacent records into runs remains the right
+implementation, but defensively rather than because this file demands it: a
+genuinely fragmented file returns multiple records, and NTFS run lists can
+split a physically contiguous allocation across records for reasons unrelated
+to fragmentation. Adjacent records must count as one run.
+
+`SPEC.md` line 158 is therefore incomplete rather than wrong. It omits the
+bound on `fm_length`, and it omits the merge.
 
 ### F4. The round size the user requests is `virtual_size`
 
@@ -98,8 +117,10 @@ though it does not establish where the ceiling actually is.
 - `st_blocks` for the working `.rmd` is 83886088, i.e. 42949677056 bytes
   allocated against a 42949673472-byte file. Non-sparse, rounded up to the
   4096-byte cluster.
-- ntfs3 surfaces `FIEMAP_EXTENT_UNWRITTEN`, giving a direct detector for
-  uninitialized preallocated ranges.
+- ntfs3 emits `FIEMAP_EXTENT_UNWRITTEN`, though the only instance observed so
+  far is on past-EOF cluster slack (F3), not on a `fallocate`d data region.
+  Whether ntfs3 flags fresh allocations `UNWRITTEN` is a Phase 0 question, not
+  an established fact.
 
 ### F7. qemu-img cannot be used as a footer oracle
 
@@ -145,9 +166,10 @@ footer is available to compare against.
 Beyond the findings above, the following defects in `SPEC.md` are corrected
 here:
 
-1. **Extent counting** must merge physically adjacent records (F3), and must
-   treat `FIEMAP_EXTENT_UNKNOWN`, `_DELALLOC`, or `_ENCODED` as untrusted
-   (exit 8) rather than as success.
+1. **Extent counting** must bound `fm_length` to the file size and merge
+   physically adjacent records (F3), and must treat `FIEMAP_EXTENT_UNKNOWN`,
+   `_DELALLOC`, `_ENCODED`, or `_DATA_INLINE` as untrusted (exit 8) rather
+   than as success.
 2. **`-S 0` is mandatory** on `qemu-img convert -n`, not "consider". Without
    it qemu punches holes for zero runs, which is exactly the sparseness failure
    mode the tool exists to prevent.
@@ -211,8 +233,12 @@ testable without touching a filesystem.
 
 **`extents` separates the ioctl from the merge.** The unsafe `FS_IOC_FIEMAP`
 call returns a `Vec<FiemapRecord>`; a pure function folds that into physical
-runs. F3 becomes a unit test seeded with the exact record pair measured off
-the device, rather than something reproducible only with hardware attached.
+runs. The merge then becomes unit-testable over synthetic records rather than
+needing hardware attached.
+
+A working Python prototype of both halves lives in `spike/fiemap.py`. Writing
+it is what caught the original error in F3, which is an argument for
+prototyping the ioctl before porting it.
 
 `error.rs` holds one `thiserror` enum with an `exit_code()` method, so the exit
 code table lives in one place instead of being scattered across commands.
@@ -265,8 +291,11 @@ feature-gated so CI can skip them.
 - CHS across every branch of the algorithm: below the 17-spt threshold, the
   31- and 63-spt fallbacks, and the cap.
 - Size parsing and alignment rules.
-- Extent merging over synthetic records, including the device-measured pair
-  from F3 as a regression fixture.
+- Extent merging over synthetic records: adjacent records fold into one run,
+  a physical gap splits runs, and a logical gap splits runs even when the
+  physical offsets happen to abut.
+- The F3 regression: a query bounded to the file size must not pick up
+  past-EOF cluster slack as an extra extent.
 
 **Integration, feature-gated, requires sudo:**
 
