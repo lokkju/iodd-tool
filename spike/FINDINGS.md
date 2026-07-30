@@ -60,10 +60,9 @@ merged runs   2   contiguous=False
 The runs are ~510 MiB and ~514 MiB, separated by a physical gap of
 1632071680 bytes (~1.5 GiB) between offset 536883200 and 2168954880.
 
-The volume had just been emptied, so this is not free-space fragmentation in
-the ordinary sense. The likely cause is the NTFS MFT zone, which the allocator
-reserves and prefers to route around, but that is a hypothesis rather than a
-measurement.
+**Revised by S5 below.** This is not a property of `fallocate`. It is a
+property of the volume's allocation history, and the cause is now measured
+rather than hypothesized.
 
 This matters because zero fragmentation is the tool's entire reason to exist.
 If a single `fallocate` call cannot deliver one extent on an *empty* volume,
@@ -98,6 +97,71 @@ costs one ioctl rather than reading the whole file:
 
 Whether writing zeros actually clears the flag on ntfs3 is untested and is
 included in the follow-up spike.
+
+## S5. The S2 split was the MFT zone, and it depends on volume history
+
+Second run, three strategies on **freshly formatted** volumes:
+
+```
+   fallocate      CONTIGUOUS   unwritten=True  sparse=False  0s
+        run 0: physical=2168954880  length=1073741824
+   seqwrite       CONTIGUOUS   unwritten=False sparse=False  2s
+        run 0: physical=2168954880  length=1073741824
+   fallocate+w    CONTIGUOUS   unwritten=False sparse=False  2s
+        run 0: physical=2168954880  length=1073741824
+```
+
+All three produce one run, at the same physical offset. So `fallocate` is not
+inherently incapable of contiguous allocation, and S2 as originally written
+was misleading.
+
+`ntfsinfo` explains the difference:
+
+```
+Cluster Size: 4096
+Volume Size in Clusters: 1048575
+MFT Zone Start: 0
+MFT Zone End: 131075
+```
+
+131075 clusters × 4096 = **536,883,200**. The S2 run 0 was physical 1867776
+with length 535015424, ending at 1867776 + 535015424 = **536,883,200**. It
+ended exactly on the MFT zone boundary and the remainder jumped to
+2168954880, which is where all three fresh-volume allocations begin.
+
+So the split happened because the allocation *started inside the MFT zone*
+and had to leave it at the boundary. On a pristine volume the allocator skips
+the zone and finds one run past it.
+
+The variable is volume history: S2's volume had been filled to ENOSPC and
+emptied, which pushes NTFS into using the MFT zone. A pristine volume behaves
+differently.
+
+**This makes the S5 comparison unrepresentative.** The strategies were
+compared only on pristine volumes, while the interesting case — a volume with
+history — was measured only with `fallocate`. A real IODD device is neither
+pristine nor empty; the test bed measured here is 87% used with years of
+history.
+
+Follow-up: `spike/allocation-dirty-volume.sh` compares all three strategies on
+a filled-then-emptied volume and on one with deliberately fragmented free
+space. Until that runs, no strategy has been shown better than any other under
+realistic conditions.
+
+## S6. Writing zeros clears `FIEMAP_EXTENT_UNWRITTEN`. Confirmed.
+
+From the same run:
+
+- `fallocate` alone: `unwritten=True`
+- sequential write: `unwritten=False`
+- `fallocate` then overwrite: `unwritten=False`
+
+So the flag is a sound post-write verification. After zeroing, any remaining
+`UNWRITTEN` extent means the zeroing did not take, and that is checkable with
+one ioctl rather than by reading the file back.
+
+Throughput was roughly 500 MB/s for the 1 GiB writes, putting a 20 GiB create
+around 40 seconds. Acceptable for a mandatory zeroing pass.
 
 ## S4. Incidental confirmations
 
