@@ -44,12 +44,16 @@ PartEntryLBA   = 83886048
 83886080 + 1 = 83886081 sectors = 42949673472 bytes, confirming F1
 independently: the guest that wrote this table saw the whole file.
 
-Both `.ima` files on the device (`tools/sedutil/RESCUE64-tarball.ima` at
-78643200 bytes = 75 MiB exactly, `tools/sedutil/UEFI64-tarball.ima` at
-33554432 bytes = 32 MiB exactly) are raw images with no footer and no `+512`,
-and they also carry `EFI PART` in their last sectors.
+**Evidence strength: one file, directly observed.** This `.rmd` was mounted
+through the device during the investigation and appeared as `/dev/sda`, so the
+mount is a direct observation rather than an inference. The two `.ima` files
+elsewhere on the volume (`tools/sedutil/*.ima`) are unrelated sedutil rescue
+images that happen to be stored there; they were never mounted through the
+device and are not evidence about firmware behaviour.
 
-Three files, none with a valid VHD footer, all mounted by the device.
+So the claim is narrow but clean: a file with no valid VHD footer mounted.
+Whether the footer matters *before* a guest has overwritten it is untested and
+is tracked as issue #1.
 
 ### F3. Naive FIEMAP extent counting rejects working files
 
@@ -126,7 +130,7 @@ statement is correct.
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | `--size` sets `virtual_size`; file is `virtual_size + 512` | F4. Matches VHD Tool++ and the one proven-working file. |
-| D2 | Footer problems are `WARN`, never `WILL-NOT-MOUNT` | F1, F2. Hard-gating reports three working files as broken. |
+| D2 | Footer problems are `WARN`, never `WILL-NOT-MOUNT` | F1, F2. Hard-gating reports a known-working file as broken. |
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
 | D5 | Zeroing policy determined by measurement, not assumption | Phase 0 spike. See below. |

@@ -46,8 +46,10 @@ stating plainly. Measured against a physical device:
   `.rmd` presents as a 42949673472-byte disk. The 512-byte VHD footer is inside
   the guest-visible region, not excluded from it, so a guest that partitions
   with GPT overwrites the footer with its backup header.
-- **A valid VHD footer is not required to mount.** Three working files on the
-  test device have no footer at all.
+- **A valid VHD footer is not required to mount.** The one file observed
+  mounted through the device has a GPT backup header where its footer should
+  be, and mounts anyway. Whether the footer matters before a guest overwrites
+  it is untested.
 - **Fragmentation and sparseness are the only hard gates**, which is why they
   are the only things this tool refuses to produce.
 
