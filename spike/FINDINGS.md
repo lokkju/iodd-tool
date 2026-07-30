@@ -294,6 +294,84 @@ Even if `ntfsmove` works, the offline-volume and dirty-volume requirements
 make it unsuitable as a default code path, and at most an opt-in with loud
 warnings.
 
+## S9. Open-source NTFS stacks that work on a raw device
+
+S8 asked whether an existing tool can defragment. This asks the harder
+question behind it: if the kernel driver cannot be steered, can we bypass it
+and do the allocation ourselves against the raw device? That is essentially
+what VHD Tool++ does on Windows.
+
+### The candidates
+
+| Stack | Write? | License | Verdict |
+|---|---|---|---|
+| `libntfs-3g` | yes | **GPL-2.0-or-later** | the only real option |
+| `ntfs` crate (ColinFinck) | **no**, read-only | MIT OR Apache-2.0 | useful for the read side only |
+| Redox OS | n/a | MIT | no NTFS driver at all; RedoxFS only |
+| ReactOS NTFS | partial | GPL-2.0 | kernel-mode C, not usable as a library |
+| `ntfsplus` (LKML) | yes | GPL-2.0 | in-development kernel driver, not a library |
+
+### libntfs-3g has exactly the right primitive
+
+```c
+typedef enum {
+    MFT_ZONE  = 0,   /* Allocate from $MFT zone. */
+    DATA_ZONE = 1,   /* Allocate from $DATA zone. */
+} NTFS_CLUSTER_ALLOCATION_ZONES;
+
+extern runlist *ntfs_cluster_alloc(ntfs_volume *vol, VCN start_vcn, s64 count,
+        LCN start_lcn, const NTFS_CLUSTER_ALLOCATION_ZONES zone);
+```
+
+`start_lcn` is a placement hint and `zone` selects the allocation zone. So
+"allocate N clusters starting at logical cluster X" is directly expressible.
+Reading `$Bitmap` through the same library would also solve the largest
+contiguous free run problem that the design currently lists as unobtainable.
+
+### The blocker: license
+
+The ntfs-3g README is explicit:
+
+> All the NTFS related components: the file system drivers, the ntfsprogs
+> utilities and the shared library libntfs-3g are distributed under the terms
+> of the GNU General Public License [...] either version 2 of the License, or
+> (at your option) any later version.
+>
+> The fuse-lite library is distributed under the terms of the GNU LGPLv2.
+
+`COPYING.LIB` exists in the tree but covers **fuse-lite only**, not the
+library. Every file checked in `libntfs-3g/` (`lcnalloc.c`, `attrib.c`,
+`volume.c`, `bitmap.c`, `mft.c`) carries a GPL header.
+
+Linking libntfs-3g makes the combined work GPL-2.0-or-later. PolyForm Shield
+1.0.0 imposes a noncompete restriction, which GPL section 6 forbids adding.
+**The two cannot be combined in one binary.**
+
+### Ways around it
+
+1. **Shell out to `ntfsmove`** as a separate process, exactly the pattern the
+   spec already uses for `qemu-img`. Separate programs exchanging data over a
+   CLI boundary do not form a combined work, so no license conflict arises.
+   Cleanest option by far, and it costs nothing to try since S8's test script
+   is already written.
+2. **Relicense to GPL-2.0-or-later** and link the library directly. Buys the
+   full API, costs the PolyForm noncompete.
+3. **Roll our own, narrowly.** Note that *relocating an existing file* is a
+   far smaller problem than *creating* one: it avoids directory B-tree
+   insertion entirely, touching only the `$DATA` runlist and `$Bitmap`. The
+   read side could use the MIT/Apache `ntfs` crate, leaving only the write
+   path bespoke. Still writes NTFS metadata by hand, with the corruption risk
+   that implies on a volume holding real data.
+4. **Do none of it** and ship verify-and-refuse per D8.
+
+### Bearing on the design
+
+The `ntfsmove` test in S8 is now the pivot rather than a curiosity. If it
+consolidates a fragmented file, option 1 becomes available and the tool can
+plausibly offer opt-in defragmentation with no license entanglement. If it
+fails, options 2 and 3 are the only paths to *producing* contiguity, and both
+are large enough to be their own project.
+
 ## S4. Incidental confirmations
 
 - `fallocate(2)` mode 0 succeeds on ntfs3. It does not return `EOPNOTSUPP`, so
