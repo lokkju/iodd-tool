@@ -110,17 +110,23 @@ sync
 df -h "$MNT" | tail -1 | sed 's/^/   /'
 
 say "2. create the target file"
+# Fill with a position-dependent pattern, NOT zeros. A file of zeros makes the
+# integrity check vacuous: a corrupted file of zeros reads identically to an
+# intact one. Each 512-byte sector carries its own offset, so a mis-copied or
+# transposed run is detectable.
 python3 - "$MNT/target.bin" "$ALLOC_SIZE" <<'PY'
-import os, sys
+import os, struct, sys
 mult = {"K": 1024, "M": 1024**2, "G": 1024**3}
 s = sys.argv[2]
 n = int(s[:-1]) * mult[s[-1].upper()] if s[-1].isalpha() else int(s)
-block = bytes(4 * 1024 * 1024)
 with open(sys.argv[1], "wb") as f:
-    w = 0
-    while w < n:
-        c = min(len(block), n - w)
-        f.write(block[:c]); w += c
+    off = 0
+    while off < n:
+        chunk = bytearray()
+        for s_off in range(off, min(off + 4 * 1024 * 1024, n), 512):
+            chunk += struct.pack("<Q", s_off) + b"IODDPATT" * 63
+        f.write(chunk[: min(4 * 1024 * 1024, n - off)])
+        off += 4 * 1024 * 1024
     f.flush(); os.fsync(f.fileno())
 PY
 sync
@@ -176,11 +182,34 @@ else
     echo "   ntfsmove changed the layout but did not reach one run."
 fi
 echo
-echo "   Data integrity check (file should still read as zeros):"
+echo "   Data integrity check (every sector must carry its own offset):"
 if [[ -f "$MNT/target.bin" ]]; then
-    python3 -c "
-d = open('$MNT/target.bin','rb').read(1024*1024)
-print('     first 1 MiB all zeros:', d == bytes(len(d)))
-print('     size on disk:', __import__('os').path.getsize('$MNT/target.bin'))
-"
+    python3 - "$MNT/target.bin" <<'PY'
+import os, struct, sys
+path = sys.argv[1]
+size = os.path.getsize(path)
+bad = checked = 0
+first_bad = None
+with open(path, "rb") as f:
+    off = 0
+    while off < size:
+        f.seek(off)
+        sec = f.read(512)
+        if len(sec) < 8:
+            break
+        stamp = struct.unpack("<Q", sec[:8])[0]
+        checked += 1
+        if stamp != off or sec[8:16] != b"IODDPATT":
+            bad += 1
+            if first_bad is None:
+                first_bad = (off, stamp)
+        off += 512 * 1024   # sample every 512th sector
+print(f"     sectors checked: {checked}   mismatched: {bad}")
+if bad:
+    print(f"     FIRST BAD: offset {first_bad[0]} carried stamp {first_bad[1]}")
+    print("     DATA CORRUPTION — the move did not preserve contents")
+else:
+    print("     contents intact")
+print(f"     size on disk: {size}")
+PY
 fi

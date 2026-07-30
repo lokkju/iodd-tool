@@ -372,6 +372,67 @@ plausibly offer opt-in defragmentation with no license entanglement. If it
 fails, options 2 and 3 are the only paths to *producing* contiguity, and both
 are large enough to be their own project.
 
+## S10. `ntfsmove` cannot defragment, and misreports success
+
+Run 2026-07-29. 512 MiB target on a volume with fragmented free space, three
+runs before the attempt.
+
+### It reported success while applying one move of three
+
+Cluster size 4096, so converting its own log to physical offsets:
+
+| Run | Before (LCN) | Claimed move | After (LCN) | Applied? |
+|---|---|---|---|---|
+| 0 | 46512 | → 292 | 292 | yes |
+| 1 | 169623 | → 417383 | 169623 | **no** |
+| 2 | 293503 | → 169623 | 293503 | **no** |
+
+`ntfsmove` printed `success` and exited 0. The extent map says otherwise.
+
+Its plan also had run 2 targeting LCN 169623, which is where run 1 was still
+sitting. The move only avoided overlapping live data because it did not
+apply. Separately, run 0 landed at LCN 292, inside the MFT zone
+(clusters 0–131075) that NTFS reserves for MFT growth.
+
+### The architectural reason it was never going to work
+
+From the source: `move_file` iterates attributes, `move_attribute` iterates
+runs, `move_datarun` moves a single run, and `find_unused` is called **per
+run**. There is no whole-file consolidation step.
+
+So even had all three moves applied, the targets (292, 417383, 169623) are not
+adjacent to one another. The file would have remained in three runs at
+different locations. `ntfsmove` relocates runs; it does not merge them. The
+name is accurate.
+
+### The dry run is not a dry run
+
+`-n` produced `!write -1 / cannot data_copy / failed` and exit 1, because
+suppressing writes makes the data copy fail. It cannot be used to preview an
+operation.
+
+### Flaw in this test
+
+The target file was filled with zeros, so the integrity check ("first 1 MiB
+all zeros: True") was vacuous: a corrupted file of zeros is indistinguishable
+from an intact one. The script now writes a verifiable pattern instead. This
+did not affect the conclusion, which rests on the extent map, but the check as
+originally written would not have caught corruption.
+
+### Consequence
+
+**Option 1 from S9 is dead.** Shelling out to `ntfsmove` cannot produce
+contiguity, so it offers no route to defragmentation and no way to preserve
+PolyForm Shield while gaining one. D8 stands: the tool verifies contiguity and
+refuses, it does not produce it.
+
+One useful positive: `bitmap_alloc`, `data_copy` and the runlist rewrite
+demonstrably **worked** for run 0. The libntfs-3g primitives function. What is
+missing in `ntfsmove` is the consolidation policy, not the machinery. So S9
+option 2 (link libntfs-3g under GPL and write the consolidation ourselves)
+remains technically viable, and is now better understood: we would be supplying
+the planner, not the mechanism.
+
 ## S4. Incidental confirmations
 
 - `fallocate(2)` mode 0 succeeds on ntfs3. It does not return `EOPNOTSUPP`, so
