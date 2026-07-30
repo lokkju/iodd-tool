@@ -69,6 +69,32 @@ Details, including the measurements behind each claim, are in
 [the design document](docs/superpowers/specs/2026-07-29-iodd-tool-design.md).
 The original format specification is in [SPEC.md](SPEC.md).
 
+## Unmount before touching the device's controls
+
+The IODD drops the physical volume off the USB bus when it switches between
+presenting the disk and presenting a virtual drive. If the host still has the
+volume mounted read-write when that happens, the driver is mid-write, gets an
+I/O error, and marks the filesystem dirty:
+
+```
+ntfs3: sdb1: ino=3, ntfs_set_state failed, -5.
+ntfs3: sdb1: Mark volume as dirty due to NTFS errors
+```
+
+After which the volume will not mount again until the flag is cleared —
+`chkdsk` on Windows, or `ntfsfix -d` for the quick version. This is what the
+vendor's "Must safely remove before eject HDD" warning is about.
+
+So:
+
+```
+udisksctl unmount -b /dev/sdX1     # before using the device's own controls
+```
+
+`doctor` and `verify` never write, so mounting read-only sidesteps the problem
+entirely — a read-only mount does not set the dirty flag. Only `create` and
+`convert` need write access.
+
 ## Platform
 
 Linux only. Relies on `fallocate(2)`, `FS_IOC_FIEMAP`, and `fstat(2)`, none of

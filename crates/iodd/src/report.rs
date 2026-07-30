@@ -183,9 +183,12 @@ fn print_summary(records: &[Record]) {
     }
 
     println!();
+    // A warned file still mounts, so counting it apart from "mountable" would
+    // read as though it did not. The device's own verdict is the parenthetical.
     println!(
-        "{} file(s): {mountable} mountable, {warn} warn, {failing} will not mount{}",
+        "{} file(s): {} will mount ({warn} with warnings), {failing} will not{}",
         records.len(),
+        mountable + warn,
         if unreadable > 0 {
             format!(", {unreadable} unreadable")
         } else {
@@ -213,10 +216,31 @@ fn display_name(path: &Path) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match path.parent().and_then(Path::file_name) {
+    let joined = match path.parent().and_then(Path::file_name) {
         Some(dir) => format!("{}/{file}", dir.to_string_lossy()),
         None => file,
+    };
+    escape_control(&joined)
+}
+
+/// Render control characters visibly instead of letting them out.
+///
+/// Not hypothetical: a real IODD carries an ISO whose filename contains an
+/// embedded newline, which split one row across two lines and misaligned every
+/// column after it. Filenames are attacker-adjacent data on a device that gets
+/// passed around, so a terminal escape sequence is worth neutering too.
+fn escape_control(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32 & 0xff)),
+            c => out.push(c),
+        }
     }
+    out
 }
 
 /// Truncate from the left: the tail of an IODD filename carries the version and
@@ -239,6 +263,28 @@ mod tests {
     fn display_name_keeps_one_directory_of_context() {
         assert_eq!(display_name(Path::new("/mnt/_ISO/a.iso")), "_ISO/a.iso");
         assert_eq!(display_name(Path::new("a.iso")), "a.iso");
+    }
+
+    /// Taken from a real device: an ISO whose filename contains an embedded
+    /// newline, which split its table row in two and misaligned everything
+    /// after it.
+    #[test]
+    fn a_newline_in_a_filename_does_not_break_the_table() {
+        let name = "/mnt/_ISO/Windows Server 2012 R2 with Update 1\n 9600.ISO";
+        let shown = display_name(Path::new(name));
+        assert!(
+            !shown.contains('\n'),
+            "must not emit a raw newline: {shown}"
+        );
+        assert!(shown.contains("\\n"), "and should show it escaped: {shown}");
+    }
+
+    #[test]
+    fn control_characters_are_neutered() {
+        assert_eq!(escape_control("a\tb"), "a\\tb");
+        assert_eq!(escape_control("a\rb"), "a\\rb");
+        assert_eq!(escape_control("a\u{1b}[31mred"), "a\\x1b[31mred");
+        assert_eq!(escape_control("plain"), "plain");
     }
 
     #[test]

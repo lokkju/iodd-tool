@@ -13,19 +13,81 @@ enclosure, NTFS volume labelled `iodd`, mounted read-only via `ntfs3`) and
 against `qemu-img` 8.2.2 on the development host. They are recorded here
 because several of them contradict `SPEC.md`.
 
-### F1. The device exposes the entire file as the virtual disk
+### F1. RETRACTED — the device does not simply expose the whole file
 
-`VHDs/Windows_Server_2012R2.rmd` is 42949673472 bytes. Mounted through the
-IODD, it presents as `/dev/sda` of **42949673472 bytes** — byte-identical to
-the file size.
+**Original claim, now known to be wrong:** that the IODD presents the entire
+file, footer included, as the virtual disk.
 
-The 512-byte footer region is therefore *inside* the guest-visible disk, not
-excluded from it. `SPEC.md` lines 21-24 model the guest-visible region as
-`virtual_size` with the footer outside it. That is wrong.
+That came from measuring exactly one file —
+`VHDs/Windows_Server_2012R2.rmd`, 42949673472 bytes, presented as a
+42949673472-byte `/dev/sda`. The arithmetic was right; generalising from it
+was not. It was the only `.rmd` on the volume and the only file without a
+valid footer, so it was the worst possible single sample.
 
-Consequence: a guest that partitions the disk with GPT writes its backup GPT
-header into the last sector, which is the footer. The footer does not survive
-first use.
+Hardware acceptance, measured 2026-07-30 with files this tool created:
+
+| File | Ext | Footer | File size | Presented |
+|---|---|---|---|---|
+| `item-b.vhd` | `.vhd` | valid | 1073742336 | **1073741824** = file − 512 |
+| `item-c-nofooter.vhd` | `.vhd` | **zeroed** | 67109376 | **67108864** = file − 512 |
+| `Windows_Server_2012R2.rmd` | `.rmd` | none | 42949673472 | 42949673472 = whole file |
+
+Confirmed by `/sys/block/sda/size` and `lsblk -b` independently.
+
+**Two hypotheses are dead.** The device does not always present the whole
+file, and it does not decide by reading the footer — a `.vhd` with its footer
+zeroed is trimmed by 512 just the same as one with a valid footer.
+
+**What is established:**
+
+- A `.vhd` is presented as **file size minus 512**, whatever the footer says or
+  whether there is one at all. The device evidently assumes the fixed-VHD
+  layout from the extension.
+- Footer validity affects neither the presented size nor listing (see F2).
+- Therefore `--size 20G` gives a guest a disk of exactly 20 GiB, not the
+  odd 20 GiB + 512 previously stated here. D1 is correct and cleaner than
+  described.
+
+**Resolved: the extension decides.** `retype` was used to rename
+`item-c-footer.vhd` to `.rmd` — same bytes, same inode, nothing else changed —
+and the device's presentation moved:
+
+```
+item-c-footer.vhd  ->  67108864 presented  (file - 512)
+item-c-footer.rmd  ->  67109376 presented  (whole file)
+```
+
+So:
+
+| Extension | Presented as |
+|---|---|
+| `.vhd` | file size − 512, i.e. the last sector is assumed to be a footer and hidden |
+| `.rmd` | the whole file, footer or not |
+
+**`SPEC.md` lines 26-28 are wrong.** They state the two carry identical bytes
+and that converting between them is a zero-cost rename. The bytes are indeed
+identical; the disk the guest sees is not. The difference is 512 bytes.
+
+This also explains the file that began the investigation.
+`Windows_Server_2012R2.rmd` is 40 GiB + 512 presented whole, with a GPT backup
+header in its final sector — precisely what results from creating a 40 GiB
+`.vhd` (file 40 GiB + 512, presenting 40 GiB) and then renaming it to `.rmd`,
+after which the guest saw 512 more bytes and partitioned to fit. The original
+sample was a record of exactly the operation `retype` performs.
+
+**Two consequences follow.**
+
+`retype` is not safe as documented. Converting a genuine `.rmd` to `.vhd`
+hides its final sector from the guest. On the sample file that sector holds the
+GPT backup header, so the operation would silently damage the partition table
+as the guest sees it.
+
+`create --removable` is questionable. It currently writes `virtual_size + 512`
+with a footer, which for a `.rmd` the guest will see in full — an odd
+`virtual_size + 512` disk with 512 bytes of footer at the end. To give a
+removable guest exactly the requested size, the file should be `virtual_size`
+with no footer, which is also what the `.ima` files on the device look like and
+what F2 says the device accepts.
 
 ### F2. A valid VHD footer is not required to mount
 
@@ -183,6 +245,7 @@ statement is correct.
 | D3 | Hard gates are extent count and sparseness only | These are the two properties the firmware actually enforces. |
 | D4 | Real CHS per the MS algorithm, exact byte size | Windows-side tooling is the only consumer that reads the field. |
 | D5 | ~~Zeroing is mandatory~~ **Superseded by D9** | Phase 0 measured stale cluster contents surviving `fallocate` in 6 of 6 samples. See `spike/FINDINGS.md` S1. |
+| D10 | **`.vhd` and `.rmd` are different formats.** `create --removable` writes a raw image of exactly `virtual_size` with no footer; `retype` converts rather than renaming | Measured: the device presents `.vhd` as file − 512 and `.rmd` whole, decided by extension. See F1. |
 | D9 | **Zeroing is off by default, with a loud warning; `--zero` opts in** | Analysis of VHD Tool++ showed the official tool does not zero either — it uses `SetFileValidData`, whose whole purpose is to skip the write. Instant creation is the point of the tool, and matching vendor behaviour matters more than being quietly slower and differently-behaved. See `spike/VHD-TOOL-PLUSPLUS.md` V1. |
 | D7 | **There is no allocation strategy.** Resolved in the negative | All three strategies produce byte-identical extent layouts. ntfs3's allocator cannot be steered from userspace. See `spike/FINDINGS.md` S7. |
 | D8 | The tool verifies contiguity; it does not produce it | Follows from D7. `fallocate` is retained as a cheap early abort, not as an allocation technique. |

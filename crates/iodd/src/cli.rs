@@ -88,6 +88,18 @@ pub struct ConvertArgs {
     #[arg(long, value_name = "SIZE")]
     pub size: Option<String>,
 
+    /// 4-byte creator tag written to the footer
+    #[arg(long, value_name = "TAG", default_value = "iodd")]
+    pub creator: String,
+
+    /// Zero the region the source does not cover before finalizing.
+    ///
+    /// Off by default, matching create and VhdTool.exe. Without it, any space
+    /// beyond the source's virtual size holds whatever was previously on those
+    /// clusters.
+    #[arg(long)]
+    pub zero: bool,
+
     /// On failure, leave the partial file in place instead of removing it
     #[arg(long)]
     pub keep_on_fail: bool,
@@ -145,6 +157,13 @@ pub struct RetypeArgs {
     /// Target presentation
     #[arg(long, value_enum)]
     pub to: Presentation,
+
+    /// Allow a conversion that hides bytes from the guest.
+    ///
+    /// Only needed for .rmd to .vhd, which takes the final 512 bytes out of the
+    /// guest-visible disk.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

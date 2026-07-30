@@ -10,6 +10,7 @@
 
 use crate::cli::{Presentation, RetypeArgs};
 use crate::error::{Error, Result};
+use crate::size;
 use std::path::{Path, PathBuf};
 
 /// `.vhd` presents as a USB fixed drive, `.rmd` as a USB removable drive.
@@ -60,18 +61,100 @@ pub fn run(args: &RetypeArgs) -> Result<u8> {
     let target = with_extension(path, wanted);
 
     // Refuse to clobber. Renaming over an existing file would destroy it
-    // silently, and retype has no --force to authorise that.
+    // silently, and there is no flag that authorises that.
     if target.exists() {
         return Err(Error::TargetExists { path: target });
     }
 
-    std::fs::rename(path, &target).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let size = std::fs::metadata(path)
+        .map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
 
-    println!("{} -> {}", path.display(), target.display());
-    Ok(0)
+    match args.to {
+        // .vhd -> .rmd: drop the footer.
+        //
+        // As a .vhd the last 512 bytes are outside the guest's view by
+        // definition, so removing them costs the guest nothing — and it keeps
+        // the guest-visible size identical across the conversion. Truncation
+        // only ever releases the final cluster, so it cannot fragment what
+        // remains.
+        Presentation::Removable => {
+            if size < 512 {
+                return Err(Error::Usage(format!(
+                    "{} is {size} bytes, too small to be a fixed VHD",
+                    path.display()
+                )));
+            }
+            let guest_before = size - 512;
+
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(|source| Error::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            file.set_len(guest_before).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            file.sync_all().map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            drop(file);
+
+            std::fs::rename(path, &target).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+            println!("{} -> {}", path.display(), target.display());
+            println!("  removed the 512-byte footer, which a .rmd would expose to the guest");
+            println!(
+                "  guest-visible size unchanged: {}",
+                size::humanize(guest_before)
+            );
+            Ok(0)
+        }
+
+        // .rmd -> .vhd: hides the final sector. Refuse unless forced.
+        //
+        // A .rmd is presented whole, a .vhd as file minus 512, so this
+        // conversion takes 512 bytes of real disk away from the guest. On a
+        // partitioned image that final sector is where GPT keeps its backup
+        // header, so the damage is not hypothetical.
+        Presentation::Fixed => {
+            if !args.force {
+                return Err(Error::Usage(format!(
+                    "converting {} to .vhd would hide its final 512 bytes from the guest.\n\
+                     A .rmd is presented whole; a .vhd has its last sector treated as a \
+                     footer and excluded. On a partitioned image that sector holds the GPT \
+                     backup header.\n\
+                     Pass --force to rename anyway, or use `iodd convert` to build a proper \
+                     fixed VHD that preserves every byte.",
+                    path.display()
+                )));
+            }
+
+            std::fs::rename(path, &target).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+            println!("{} -> {}", path.display(), target.display());
+            eprintln!(
+                "iodd: warning: the final 512 bytes are now hidden from the guest; \
+                 the visible disk shrank from {} to {}",
+                size::humanize(size),
+                size::humanize(size.saturating_sub(512))
+            );
+            Ok(0)
+        }
+    }
 }
 
 /// Replace the extension, preserving the rest of the name.

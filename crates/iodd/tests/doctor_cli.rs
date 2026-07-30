@@ -195,8 +195,10 @@ fn a_fragmented_iso_over_the_ceiling_fails_the_aggregate() {
 #[test]
 fn strict_promotes_warnings_to_a_failing_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    // A footerless file under .rmd: mountable, but with a footer warning.
-    write_raw(&dir.path().join("raw.rmd"), 512 * 1024, 0x77);
+    // A footerless .vhd warns: a .vhd is presented as file minus 512, so its
+    // last sector is meant to be a footer. (A footerless .rmd is correct and
+    // would not warn — the device presents those whole.)
+    write_raw(&dir.path().join("raw.vhd"), 512 * 1024, 0x77);
 
     iodd()
         .args(["doctor", &dir.path().to_string_lossy()])
@@ -297,15 +299,20 @@ fn symlinks_are_not_followed() {
 fn the_summary_counts_by_verdict() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_vhd(&dir.path().join("good.vhd"), 1024 * 1024);
-    write_raw(&dir.path().join("warn.rmd"), 512 * 1024, 0xBB);
+    // Footerless .vhd: a real warning, since a .vhd's last sector should be a
+    // footer.
+    write_raw(&dir.path().join("warn.vhd"), 512 * 1024, 0xBB);
 
     iodd()
         .args(["doctor", &dir.path().to_string_lossy()])
         .assert()
         .success()
         .stdout(contains("2 file(s):"))
-        .stdout(contains("mountable"))
-        .stdout(contains("warn"));
+        // A warned file still mounts, so the count of things that will mount
+        // includes it; the warning is the parenthetical.
+        .stdout(contains("2 will mount"))
+        .stdout(contains("1 with warnings"))
+        .stdout(contains("0 will not"));
 }
 
 /// The vendor documents a 32-item limit per directory containing images.

@@ -315,6 +315,70 @@ pub fn require_contiguous(file: &File, len: u64, path: &Path) -> Result<()> {
     })
 }
 
+/// Measure the largest contiguous allocation this directory will currently
+/// grant, by binary search, and report it in bytes.
+///
+/// This is the "largest linear space" figure that makes a refusal actionable:
+/// telling an operator their 12 GiB image will not fit is far less use than
+/// telling them 8 GiB would. `SPEC.md` line 162 asks for exactly this on
+/// failure.
+///
+/// The design wrote it off as unobtainable on Linux, because ntfs3 hides
+/// `$Bitmap` without the `showmeta` mount option and there is no `defrag /A` to
+/// scrape as VHD Tool++ does. But an allocation that is not zeroed is only a
+/// `fallocate` and an extent check, so the answer can simply be asked for
+/// rather than derived. Each probe is created and immediately removed.
+///
+/// Returns `None` when even `granularity` bytes cannot be had contiguously.
+pub fn probe_largest_contiguous(dir: &Path, upper: u64, granularity: u64) -> Option<u64> {
+    let gran = granularity.max(512);
+    let mut low = 0u64;
+    let mut high = (upper / gran) * gran;
+    let mut best = None;
+
+    while low <= high && high >= gran {
+        let mid = ((low + high) / 2 / gran) * gran;
+        if mid < gran {
+            break;
+        }
+        if fits_contiguously(dir, mid) {
+            best = Some(mid);
+            low = mid + gran;
+        } else {
+            if mid < gran * 2 {
+                break;
+            }
+            high = mid - gran;
+        }
+    }
+    best
+}
+
+/// One probe: can `len` bytes be had in a single run right now?
+fn fits_contiguously(dir: &Path, len: u64) -> bool {
+    let probe = dir.join(format!(".iodd-probe-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&probe);
+
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&probe)
+    else {
+        return false;
+    };
+
+    let ok = allocate(&file, len, &probe).is_ok_and(|outcome| {
+        outcome == AllocOutcome::Reserved
+            && extents::map(file.as_fd(), len, &probe).is_ok_and(|m| m.runs.len() == 1)
+    });
+
+    drop(file);
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 /// Progress reporting for the zero pass, which can run for minutes.
 pub trait Progress {
     fn update(&mut self, written: u64, total: u64);
@@ -621,6 +685,40 @@ mod tests {
             }
             Err(e) => panic!("unexpected: {e}"),
         }
+    }
+
+    #[test]
+    fn probing_finds_something_on_a_normal_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A dev box has room for a few MiB contiguously; the point is that the
+        // search terminates and returns a plausible figure rather than looping.
+        let got = probe_largest_contiguous(dir.path(), 16 * 1024 * 1024, 1024 * 1024);
+        match got {
+            Some(n) => {
+                assert!(n >= 1024 * 1024, "should find at least the granularity");
+                assert!(n <= 16 * 1024 * 1024, "must not exceed the upper bound");
+                assert_eq!(n % (1024 * 1024), 0, "must be granularity-aligned");
+            }
+            None => eprintln!("filesystem granted nothing contiguously; acceptable"),
+        }
+    }
+
+    #[test]
+    fn probing_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = probe_largest_contiguous(dir.path(), 8 * 1024 * 1024, 1024 * 1024);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "probe files remain: {leftovers:?}");
+    }
+
+    #[test]
+    fn probing_with_a_zero_bound_returns_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(probe_largest_contiguous(dir.path(), 0, 1024 * 1024), None);
     }
 
     #[test]

@@ -153,8 +153,9 @@ pub struct Assessment {
 pub fn grade(f: &FileFacts, policy: &Policy) -> Assessment {
     match f.ext.as_str() {
         "iso" => grade_iso(f, policy),
-        "ima" => grade_ima(f),
-        // vhd, rmd, vmdk: all expected to be fixed-VHD bytes.
+        // Raw images: the whole file is the guest's disk, and no footer belongs.
+        "ima" | "rmd" => grade_raw(f),
+        // vhd and vmdk: fixed-VHD bytes, last sector is a footer.
         _ => grade_vhd_family(f),
     }
 }
@@ -181,23 +182,78 @@ fn grade_iso(f: &FileFacts, policy: &Policy) -> Assessment {
     }
 }
 
-/// `.ima` — floppy images. The device's tolerance here is undocumented, so
-/// fragmentation warns rather than failing, and the reason says why.
-fn grade_ima(f: &FileFacts) -> Assessment {
-    if f.run_count > 1 {
-        return Assessment {
-            verdict: Verdict::Warn,
-            reasons: vec![format!(
-                "{} fragments; the device's tolerance for floppy images is \
-                 undocumented, so this is unverified rather than known-bad",
+/// `.rmd` and `.ima` — raw removable images.
+///
+/// Measured on hardware: the device presents these **whole**, unlike a `.vhd`
+/// which has its final sector treated as a footer and excluded. So a footer
+/// does not belong here, and its absence is correct rather than a finding.
+///
+/// A footer that *is* present is the anomaly worth reporting: the guest will
+/// see those 512 bytes as trailing disk, and the file is most likely a `.vhd`
+/// that was renamed.
+fn grade_raw(f: &FileFacts) -> Assessment {
+    let mut reasons = Vec::new();
+    let mut fatal = false;
+
+    if f.size > 0 && f.allocated < f.size {
+        reasons.push(format!(
+            "sparse: {} bytes allocated for a {} byte file; the device streams \
+             sectors off the extent map and cannot read a hole",
+            f.allocated, f.size
+        ));
+        fatal = true;
+    }
+
+    if f.ext == "rmd" {
+        // .rmd is presented whole and the device requires one extent.
+        if f.run_count > 1 {
+            reasons.push(format!(
+                "{} fragments; the device requires exactly 1",
                 f.run_count
-            )],
+            ));
+            fatal = true;
+        }
+    } else if f.run_count > 1 {
+        // .ima: the tolerance is undocumented, so this is unverified rather
+        // than known-bad.
+        reasons.push(format!(
+            "{} fragments; the device's tolerance for floppy images is \
+             undocumented, so this is unverified rather than known-bad",
+            f.run_count
+        ));
+    }
+
+    if fatal {
+        return Assessment {
+            verdict: Verdict::WillNotMount,
+            reasons,
         };
     }
-    Assessment {
-        verdict: Verdict::Mountable,
-        reasons: Vec::new(),
+
+    if f.tail.starts_with(footer::COOKIE) {
+        reasons.push(format!(
+            "the last 512 bytes are a VHD footer, which a .{} does not use. The \
+             device presents this file whole, so the guest sees the footer as \
+             trailing disk. It was probably a .vhd that was renamed; \
+             `iodd retype --to removable` removes the footer properly.",
+            f.ext
+        ));
     }
+
+    if f.any_unwritten {
+        reasons.push(
+            "contains uninitialized extents; a guest will see whatever was \
+             previously on those clusters, not zeros"
+                .to_string(),
+        );
+    }
+
+    let verdict = if reasons.is_empty() {
+        Verdict::Mountable
+    } else {
+        Verdict::Warn
+    };
+    Assessment { verdict, reasons }
 }
 
 fn grade_vhd_family(f: &FileFacts) -> Assessment {
@@ -467,6 +523,13 @@ mod tests {
         }
     }
 
+    /// A raw image: no footer, because raw types do not use one.
+    fn raw_facts(ext: &str) -> FileFacts {
+        let mut f = facts(ext);
+        f.tail = [0u8; 512];
+        f
+    }
+
     fn grade_default(f: &FileFacts) -> Assessment {
         grade(f, &Policy::default())
     }
@@ -481,10 +544,9 @@ mod tests {
     }
 
     #[test]
-    fn rmd_and_vmdk_use_the_same_ruleset_as_vhd() {
-        for ext in ["rmd", "vmdk"] {
-            assert_eq!(grade_default(&facts(ext)).verdict, Verdict::Mountable);
-        }
+    fn vmdk_uses_the_same_ruleset_as_vhd() {
+        // IODD expects fixed-VHD bytes under a .vmdk name.
+        assert_eq!(grade_default(&facts("vmdk")).verdict, Verdict::Mountable);
     }
 
     // ---- the two hard gates -----------------------------------------------
@@ -509,20 +571,59 @@ mod tests {
 
     // ---- D2: footer problems are warnings ---------------------------------
 
-    /// The design's named fixture, and the shape of the one file measured
-    /// mounting on real hardware: no footer at all, yet it works.
+    /// A footerless `.rmd` is **correct**, not a finding.
+    ///
+    /// Hardware showed the device presents a `.rmd` whole, so a footer would be
+    /// visible to the guest as trailing disk. Its absence is the right state.
+    /// An earlier version of this graded it WARN, from the mistaken belief that
+    /// every type wanted a footer.
     #[test]
-    fn a_footerless_raw_file_under_rmd_is_mountable_with_a_warning() {
-        let mut f = facts("rmd");
-        f.tail = [0xAAu8; 512];
-        let a = grade_default(&f);
-        assert_eq!(a.verdict, Verdict::Warn, "{:?}", a.reasons);
-        assert!(!a.verdict.is_failure(), "a working file must not be failed");
+    fn a_footerless_rmd_is_simply_mountable() {
+        let a = grade_default(&raw_facts("rmd"));
+        assert_eq!(a.verdict, Verdict::Mountable, "{:?}", a.reasons);
+        assert!(
+            a.reasons.is_empty(),
+            "no findings expected: {:?}",
+            a.reasons
+        );
     }
 
+    /// The file that began the investigation: a 40 GiB `.rmd` whose last sector
+    /// is a GPT backup header. Under the corrected model that is exactly what a
+    /// partitioned raw removable image looks like, so it grades clean.
     #[test]
-    fn a_footer_clobbered_by_gpt_is_a_warning_with_an_explanation() {
-        let mut f = facts("rmd");
+    fn the_device_rmd_grades_clean_under_the_corrected_model() {
+        let mut f = raw_facts("rmd");
+        f.size = 42_949_673_472;
+        f.allocated = 42_949_677_056;
+        f.tail[0..8].copy_from_slice(b"EFI PART");
+        let a = grade_default(&f);
+        assert_eq!(a.verdict, Verdict::Mountable, "{:?}", a.reasons);
+    }
+
+    /// A `.rmd` that still carries a VHD footer is the anomaly: the guest will
+    /// see it as trailing disk, and the file was probably a renamed `.vhd`.
+    #[test]
+    fn an_rmd_with_a_footer_is_reported() {
+        let a = grade_default(&facts("rmd"));
+        assert_eq!(a.verdict, Verdict::Warn, "{:?}", a.reasons);
+        assert!(
+            a.reasons.iter().any(|r| r.contains("does not use")),
+            "{:?}",
+            a.reasons
+        );
+        assert!(
+            a.reasons.iter().any(|r| r.contains("retype")),
+            "should point at the fix: {:?}",
+            a.reasons
+        );
+    }
+
+    /// The GPT explanation still applies to a `.vhd`, where the last sector
+    /// really is supposed to be a footer.
+    #[test]
+    fn a_vhd_footer_clobbered_by_gpt_is_a_warning_with_an_explanation() {
+        let mut f = facts("vhd");
         f.tail[0..8].copy_from_slice(b"EFI PART");
         let a = grade_default(&f);
         assert_eq!(a.verdict, Verdict::Warn);
@@ -531,6 +632,13 @@ mod tests {
             "the operator should be told why: {:?}",
             a.reasons
         );
+    }
+
+    #[test]
+    fn a_fragmented_rmd_will_not_mount() {
+        let mut f = raw_facts("rmd");
+        f.run_count = 3;
+        assert_eq!(grade_default(&f).verdict, Verdict::WillNotMount);
     }
 
     #[test]
@@ -646,12 +754,12 @@ mod tests {
 
     #[test]
     fn a_contiguous_ima_is_mountable() {
-        assert_eq!(grade_default(&facts("ima")).verdict, Verdict::Mountable);
+        assert_eq!(grade_default(&raw_facts("ima")).verdict, Verdict::Mountable);
     }
 
     #[test]
     fn a_fragmented_ima_warns_and_says_the_threshold_is_unknown() {
-        let mut f = facts("ima");
+        let mut f = raw_facts("ima");
         f.run_count = 4;
         let a = grade_default(&f);
         assert_eq!(a.verdict, Verdict::Warn);

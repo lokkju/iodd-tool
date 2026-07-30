@@ -40,9 +40,25 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     let creator = Creator::parse(&args.creator).map_err(Error::Usage)?;
     let out = resolve_extension(&args.out, args.removable);
-    let total_size = virtual_size
-        .checked_add(u64::try_from(crate::footer::FOOTER_SIZE).unwrap_or(512))
-        .ok_or_else(|| Error::Usage("size + 512 overflows a 64-bit byte count".into()))?;
+
+    // Measured on hardware: the device decides by extension. A `.vhd` is
+    // presented as file size minus 512, on the assumption that the last sector
+    // is a footer; a `.rmd` is presented whole. So a removable image is a raw
+    // image of exactly the requested size and carries no footer, matching the
+    // `.ima` files the device itself ships. Giving it a footer would hand the
+    // guest 512 bytes of it as trailing disk. See design F1 and D10.
+    let raw = out
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("rmd"));
+
+    let total_size = if raw {
+        virtual_size
+    } else {
+        virtual_size
+            .checked_add(u64::try_from(crate::footer::FOOTER_SIZE).unwrap_or(512))
+            .ok_or_else(|| Error::Usage("size + 512 overflows a 64-bit byte count".into()))?
+    };
 
     if out.exists() && !args.force {
         return Err(Error::TargetExists { path: out });
@@ -69,12 +85,21 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
         });
     }
 
-    println!(
-        "creating {} ({} virtual + 512 footer = {} bytes)",
-        out.display(),
-        size::humanize(virtual_size),
-        total_size
-    );
+    if raw {
+        println!(
+            "creating {} (raw removable image, {} = {} bytes, no footer)",
+            out.display(),
+            size::humanize(virtual_size),
+            total_size
+        );
+    } else {
+        println!(
+            "creating {} ({} virtual + 512 footer = {} bytes)",
+            out.display(),
+            size::humanize(virtual_size),
+            total_size
+        );
+    }
 
     // ---- 1. reserve --------------------------------------------------------
     let target = TempTarget::create(&out, args.keep_on_fail)?;
@@ -93,8 +118,18 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     // ---- 2. early extent check --------------------------------------------
     // Before any data is written, so a doomed target costs nothing.
-    if outcome == AllocOutcome::Reserved {
-        alloc::require_contiguous(target.file(), total_size, target.path())?;
+    if outcome == AllocOutcome::Reserved
+        && let Err(e) = alloc::require_contiguous(target.file(), total_size, target.path())
+    {
+        // Release our own reservation *before* measuring. Otherwise the failed
+        // allocation is still holding the space, and both the free-space figure
+        // and the largest-run probe come back short by exactly the size we are
+        // about to give back — which is precisely the number the operator is
+        // trying to learn.
+        let kept = args.keep_on_fail;
+        drop(target);
+        report_refusal(&e, dir, total_size, kept);
+        return Err(e.into());
     }
 
     // ---- 3. zero, if asked -------------------------------------------------
@@ -112,9 +147,11 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
     // ---- 4. post-write checks ---------------------------------------------
     alloc::verify_written(target.file(), total_size, target.path(), zeroed)?;
 
-    // ---- 5. footer in place ------------------------------------------------
-    let footer = Footer::now(virtual_size, creator);
-    target.write_at(&footer.to_bytes(), virtual_size)?;
+    // ---- 5. footer in place, unless this is a raw removable image ---------
+    let footer = (!raw).then(|| Footer::now(virtual_size, creator));
+    if let Some(f) = &footer {
+        target.write_at(&f.to_bytes(), virtual_size)?;
+    }
 
     // ---- 6. re-verify, then publish ---------------------------------------
     alloc::require_contiguous(target.file(), total_size, target.path())?;
@@ -127,13 +164,18 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 
     target.finalize(args.force)?;
 
-    println!(
-        "  geometry      {}/{}/{}",
-        footer.geometry.cylinders, footer.geometry.heads, footer.geometry.sectors_per_track
-    );
-    println!("  creator       {creator}");
+    if let Some(f) = &footer {
+        println!(
+            "  geometry      {}/{}/{}",
+            f.geometry.cylinders, f.geometry.heads, f.geometry.sectors_per_track
+        );
+        println!("  creator       {creator}");
+    } else {
+        println!("  footer        none (raw removable image)");
+    }
     println!("  contiguous    yes (1 extent)");
     println!("  zeroed        {}", if zeroed { "yes" } else { "no" });
+    println!("  guest sees    {}", size::humanize(virtual_size));
     println!("{} created", out.display());
 
     if !zeroed {
@@ -155,6 +197,68 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// Explain a refusal in terms an operator can act on.
+///
+/// `SPEC.md` line 162 asks for the extent map, the file size, and the largest
+/// contiguous free run. The first two we have; the third we measure, since an
+/// unzeroed allocation is cheap enough to probe for (design D9's unintended
+/// dividend). Knowing that 8 GiB would fit is far more use than being told
+/// 12 GiB will not.
+fn report_refusal(err: &ntfs_contig::Error, dir: &Path, requested: u64, kept: bool) {
+    let ntfs_contig::Error::Fragmented { runs, .. } = err else {
+        return;
+    };
+
+    eprintln!();
+    eprintln!(
+        "iodd: {} could not be allocated in one extent. It came back as {}:",
+        size::humanize(requested),
+        runs.len()
+    );
+    for (i, run) in runs.iter().take(8).enumerate() {
+        eprintln!(
+            "iodd:   run {i}: physical={} length={}",
+            run.physical,
+            size::humanize(run.length)
+        );
+    }
+    if runs.len() > 8 {
+        eprintln!("iodd:   ... and {} more", runs.len() - 8);
+    }
+
+    if kept {
+        eprintln!(
+            "iodd: note: --keep-on-fail is retaining the partial file, so the \
+             figures below exclude the space it still holds."
+        );
+    }
+
+    if let Some(free) = fsinfo::free_space(dir) {
+        eprintln!("iodd: free space on this volume: {}", size::humanize(free));
+    }
+
+    eprint!("iodd: measuring the largest contiguous run available... ");
+    match alloc::probe_largest_contiguous(dir, requested, 64 * 1024 * 1024) {
+        Some(best) => {
+            eprintln!("{}", size::humanize(best));
+            eprintln!(
+                "iodd: a target of {} or less should succeed right now.",
+                size::humanize(best)
+            );
+        }
+        None => eprintln!("nothing usable"),
+    }
+
+    eprintln!(
+        "iodd: nothing on Linux can relocate NTFS clusters, so this cannot be \
+         repaired here."
+    );
+    eprintln!(
+        "iodd: consolidate free space on Windows (built-in defrag, or Sysinternals \
+         Contig on one file), or use a volume with a larger contiguous free run."
+    );
+}
+
 /// Apply the default extension, and warn when an explicit one contradicts
 /// `--removable`.
 ///
@@ -166,7 +270,7 @@ pub fn run(args: &CreateArgs) -> Result<u8> {
 /// leave `--out "Win11 23H2.v2"` named exactly that, with no `.vhd` at all and
 /// nothing the device would recognize. A dot in the stem is far commoner than
 /// an exotic deliberate extension.
-fn resolve_extension(out: &Path, removable: bool) -> PathBuf {
+pub(crate) fn resolve_extension(out: &Path, removable: bool) -> PathBuf {
     /// Extensions IODD recognizes; anything else is treated as part of the name.
     const RECOGNIZED: [&str; 5] = ["vhd", "rmd", "vmdk", "ima", "iso"];
 

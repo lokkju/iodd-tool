@@ -223,48 +223,91 @@ fn verify_handles_a_file_too_small_for_a_footer() {
 
 // ---- retype -------------------------------------------------------------
 
+/// `.vhd` to `.rmd` removes the footer.
+///
+/// As a `.vhd` the final 512 bytes are outside the guest's view, so dropping
+/// them costs the guest nothing — and it keeps the guest-visible size identical
+/// across the conversion, which is the whole point. The inode survives, so this
+/// is still a rename plus a truncate rather than a copy.
 #[test]
-fn retype_renames_without_touching_bytes() {
+fn retype_to_removable_drops_the_footer_and_preserves_the_guest_view() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vhd = write_vhd(dir.path(), "disk.vhd", 256 * 1024);
 
     let before = std::fs::read(&vhd).expect("read");
     let inode_before = std::fs::metadata(&vhd).expect("stat").ino();
+    let guest_before = before.len() as u64 - 512;
 
     iodd()
         .args(["retype", &vhd.to_string_lossy(), "--to", "removable"])
         .assert()
-        .success();
+        .success()
+        .stdout(contains("removed the 512-byte footer"));
 
     let rmd = dir.path().join("disk.rmd");
-    assert!(rmd.exists(), "target should exist");
-    assert!(!vhd.exists(), "source should be gone");
-    assert_eq!(std::fs::read(&rmd).expect("read"), before, "bytes changed");
+    assert!(rmd.exists());
+    assert!(!vhd.exists());
+
+    let after = std::fs::read(&rmd).expect("read");
+    assert_eq!(
+        after.len() as u64,
+        guest_before,
+        "the .rmd should be exactly what the guest saw as a .vhd"
+    );
+    assert_eq!(
+        &after[..],
+        &before[..after.len()],
+        "the retained bytes must be untouched"
+    );
     assert_eq!(
         std::fs::metadata(&rmd).expect("stat").ino(),
         inode_before,
-        "a rename must preserve the inode, not copy"
+        "truncate and rename must not copy the file"
     );
 }
 
+/// `.rmd` to `.vhd` hides the final sector from the guest, so it is refused
+/// without `--force`.
+///
+/// On a partitioned image that sector holds the GPT backup header, which is
+/// exactly what the device's own sample file has, so the damage is real rather
+/// than theoretical.
 #[test]
-fn retype_round_trips() {
+fn retype_to_fixed_is_refused_without_force() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let vhd = write_vhd(dir.path(), "rt.vhd", 128 * 1024);
-    let digest = std::fs::read(&vhd).expect("read");
+    let rmd = dir.path().join("raw.rmd");
+    std::fs::write(&rmd, vec![0xEEu8; 128 * 1024]).expect("write");
 
-    iodd()
-        .args(["retype", &vhd.to_string_lossy(), "--to", "removable"])
-        .assert()
-        .success();
-    let rmd = dir.path().join("rt.rmd");
     iodd()
         .args(["retype", &rmd.to_string_lossy(), "--to", "fixed"])
         .assert()
-        .success();
+        .code(1)
+        .stderr(contains("hide its final 512 bytes"));
 
+    assert!(rmd.exists(), "the source must be untouched");
+    assert!(!dir.path().join("raw.vhd").exists());
+}
+
+#[test]
+fn retype_to_fixed_with_force_warns_about_what_it_hid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rmd = dir.path().join("raw.rmd");
+    std::fs::write(&rmd, vec![0xEEu8; 128 * 1024]).expect("write");
+    let before = std::fs::read(&rmd).expect("read");
+
+    iodd()
+        .args(["retype", &rmd.to_string_lossy(), "--to", "fixed", "--force"])
+        .assert()
+        .success()
+        .stderr(contains("now hidden from the guest"));
+
+    let vhd = dir.path().join("raw.vhd");
     assert!(vhd.exists());
-    assert_eq!(std::fs::read(&vhd).expect("read"), digest);
+    assert_eq!(
+        std::fs::read(&vhd).expect("read"),
+        before,
+        "--force renames without altering bytes; only the presentation changes"
+    );
 }
 
 #[test]

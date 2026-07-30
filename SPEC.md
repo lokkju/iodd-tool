@@ -13,9 +13,15 @@ The official tooling (VHD Tool++) runs only on Windows. The standard Linux path 
 
 ## Format model
 
-### The file is a fixed VHD in all cases
+### `.vhd` is a fixed VHD; `.rmd` is a raw image
 
-Both `.vhd` and `.rmd` files carry the identical byte structure:
+> **Corrected 2026-07-30 by measurement on hardware.** This section previously
+> stated that both extensions carry identical bytes and that converting between
+> them is a zero-cost rename. That is wrong. See the design document, finding
+> F1, for the measurements; the original text is preserved at the end of this
+> section.
+
+A `.vhd` carries a 512-byte VHD footer after the guest-visible data:
 
 ```
 offset 0 .................. virtual_size-1    raw disk image (guest-visible sectors)
@@ -23,9 +29,49 @@ offset virtual_size ....... virtual_size+511  VHD footer (512 bytes)
 total file size = virtual_size + 512
 ```
 
-The VHD footer's `Disk Type` field is always `2` (fixed) for both extensions. **Fixed vs. removable is an IODD presentation concept selected by file extension, not a VHD-format concept.** The tool must never emit `Disk Type = 6` (removable is not a VHD footer disk type) or attempt to distinguish the two files at the byte level. `--removable` changes only the default output extension and nothing in the footer.
+A `.rmd` carries no footer. The whole file is the guest's disk:
 
-Consequence: converting a `.vhd` to a `.rmd` (or back) is a rename. The tool should expose this as a zero-cost operation rather than a rewrite.
+```
+offset 0 .................. virtual_size-1    raw disk image (guest-visible sectors)
+total file size = virtual_size
+```
+
+**The device decides by extension, not by inspecting the file.** Measured: a
+`.vhd` is presented to the guest as *file size minus 512*, whether its footer is
+valid, invalid, or entirely absent; a `.rmd` is presented whole. The same bytes
+under the two names produce guest disks differing by 512 bytes.
+
+The `.ima` type follows the `.rmd` rule — raw, no footer — which matches the
+`.ima` files IODD themselves ship.
+
+Where a footer is written its `Disk Type` field is always `2` (fixed). The tool
+must never emit `Disk Type = 6`; removable is not a VHD footer disk type, and
+removable-ness is carried by the extension rather than by any field.
+
+Consequence: converting between the two is **not** a rename.
+
+- `.vhd` → `.rmd` must **remove** the footer. Those 512 bytes are outside the
+  guest's view as a `.vhd`, so dropping them costs the guest nothing and keeps
+  the guest-visible size identical. A truncation releases only the final
+  cluster, so it cannot fragment what remains.
+- `.rmd` → `.vhd` **hides the final sector** from the guest. On a partitioned
+  image that sector holds the GPT backup header, so this must be refused unless
+  explicitly forced.
+
+<details>
+<summary>Original text, superseded</summary>
+
+> Both `.vhd` and `.rmd` files carry the identical byte structure … The VHD
+> footer's `Disk Type` field is always `2` (fixed) for both extensions. **Fixed
+> vs. removable is an IODD presentation concept selected by file extension, not
+> a VHD-format concept.** The tool must never emit `Disk Type = 6` … or attempt
+> to distinguish the two files at the byte level. `--removable` changes only the
+> default output extension and nothing in the footer.
+>
+> Consequence: converting a `.vhd` to a `.rmd` (or back) is a rename. The tool
+> should expose this as a zero-cost operation rather than a rewrite.
+
+</details>
 
 ### VHD footer layout (512 bytes, big-endian)
 
@@ -84,24 +130,29 @@ cylinders = cth // heads
 ## CLI
 
 ```
-iodd create  --size SIZE   --out PATH [--removable] [--force] [--creator TAG]
-iodd convert --source PATH --out PATH [--removable] [--force] [--size SIZE]
+iodd create  --size SIZE   --out PATH [--removable] [--force] [--creator TAG] [--zero] [--keep-on-fail]
+iodd convert --source PATH --out PATH [--removable] [--force] [--size SIZE] [--creator TAG] [--zero] [--keep-on-fail]
 iodd verify  PATH [--strict]
-iodd doctor  ROOT [--recursive] [--type LIST] [--format table|json] [--strict] [--iso-max-fragments N]
-iodd retype  PATH --to {fixed|removable}
+iodd doctor  ROOT [--no-recursive] [--type LIST] [--format table|json] [--strict] [--iso-max-fragments N]
+iodd retype  PATH --to {fixed|removable} [--force]
 ```
 
 `SIZE` accepts `20G`, `20GiB`, `512M`, raw byte counts; parsed to an exact byte value and validated for 512-alignment. Default extension follows `--removable` (`.rmd`) or its absence (`.vhd`); if `--out` already carries an extension it is honored and only a mismatch with `--removable` produces a warning.
 
-`create` makes a blank (zero-filled) fixed VHD/RMD of the given size.
+`create` makes a blank fixed VHD (`.vhd`) or raw removable image (`.rmd`) of the given size.
+
+> **Corrected 2026-07-30.** This previously said "zero-filled". It is not, by default. `fallocate` reserves clusters without writing them, so the data region holds whatever was previously on those clusters — the filesystem reports zeros only because it synthesizes them past the valid data length, while anything reading the raw device, the IODD included, sees the old bytes. `VhdTool.exe` behaves the same way, which is what "instantly creates fixed-size VHD files" means. `--zero` writes the region and `create` warns loudly when it does not. Measured six of six samples on ntfs3; see design decision D9.
 
 `convert` writes an existing image into a contiguous fixed VHD/RMD. Raw sources are handled natively. Non-raw sources (qcow2, dynamic VHD, VMDK) require `qemu-img` on `PATH` as an optional dependency; the tool converts them into the pre-allocated target with `qemu-img convert -n` (see below) rather than letting qemu create the file. `--size` may enlarge the target beyond the source image (remaining sectors stay zero); it must be `>=` the source virtual size.
 
 `verify` inspects a single existing file: footer validity, checksum, disk type, size-field/file-size agreement, extent count, allocation. `--strict` turns fragmentation and any sparseness into a non-zero exit; without it they are reported as warnings.
 
-`doctor` audits every IODD-mountable file under `ROOT`, which is expected to be a mounted IODD volume (or a subtree of one). It is the "will everything on this device mount?" check. It is strictly read-only: files are opened `O_RDONLY` and only the footer, extent map, and stat are read; the tool never writes to the device. `--type` restricts to a comma-separated set of extensions (default: all recognized types). `--iso-max-fragments` overrides the ISO fragment ceiling for device families that differ from the default of 24. `--strict` promotes warnings to failures in the aggregate exit code. `--format json` emits machine-readable results for scripting.
+`doctor` audits every IODD-mountable file under `ROOT`, which is expected to be a mounted IODD volume (or a subtree of one). It recurses by default (`--no-recursive` to opt out), because IODD layouts nest: on a real device every mountable file sits under `_ISO/`, `VHDs/` or similar, so a top-level-only scan would report nothing. It is the "will everything on this device mount?" check. It is strictly read-only: files are opened `O_RDONLY` and only the footer, extent map, and stat are read; the tool never writes to the device. `--type` restricts to a comma-separated set of extensions (default: all recognized types). `--iso-max-fragments` overrides the ISO fragment ceiling for device families that differ from the default of 24. `--strict` promotes warnings to failures in the aggregate exit code. `--format json` emits machine-readable results for scripting.
 
-`retype` renames between `.vhd` and `.rmd` without rewriting bytes.
+`retype` converts between `.vhd` and `.rmd`. **Not a pure rename** — see the
+Format model. `.vhd` → `.rmd` removes the 512-byte footer, preserving the
+guest-visible size. `.rmd` → `.vhd` would hide the final sector from the guest
+and is refused without `--force`.
 
 ## Operations
 
@@ -196,7 +247,7 @@ Do not adopt the `dist init` output wholesale. Reconcile the generated `release.
 
 ## Testing
 
-Cross-check generated footers against `qemu-img create -f vpc -o subformat=fixed,force_size` output: for the same size, `qemu-img info -f vpc` on the tool's file must report `file format: vpc` and the exact virtual size, and the tool's footer must be byte-identical to qemu's harvested footer for that size. Validate the full matrix of sizes that exercise each CHS geometry branch (below the 17-spt threshold, the 31- and 63-spt fallbacks, and the CHS cap). Validate that `create` on a freshly-formatted NTFS loopback yields one extent and non-sparse `st_blocks`, and that a deliberately fragmented free-space layout is detected and refused. Validate that `.vhd` and `.rmd` outputs are byte-identical for the same size and that `retype` is a pure rename. For `doctor`, build a fixture directory holding one of each verdict class per type (a clean fixed VHD, a fragmented one, a sparse one, a dynamic VHD and a VHDX under `.vhd` names, an ISO under and over the fragment ceiling, a real VMDK under a `.vhd`/`.vmdk` name) and assert both the per-file verdicts and the aggregate exit code, in default and `--strict` modes, without any write occurring to the fixture (verify mtimes and inode block counts are unchanged after the run).
+Cross-check generated footers against `qemu-img create -f vpc -o subformat=fixed,force_size` output: for the same size, `qemu-img info -f vpc` on the tool's file must report `file format: vpc` and the exact virtual size, and the tool's footer must match qemu's harvested footer in every invariant field — cookie, features, format version, data offset, size fields, disk type, checksum — but **not** byte-identically: timestamp, UUID and creator differ per invocation, and geometry differs because qemu without `force_size` grows the sector count until the CHS product covers it while this tool keeps the exact size. Key golden vectors on the harvested footer's own `Original Size`, never on a requested size. Validate the full matrix of sizes that exercise each CHS geometry branch (below the 17-spt threshold, the 31- and 63-spt fallbacks, and the CHS cap). Validate that `create` on a freshly-formatted NTFS loopback yields one extent and non-sparse `st_blocks`, and that a deliberately fragmented free-space layout is detected and refused. Validate that a `.vhd` is `virtual_size + 512` with a footer and a `.rmd` is `virtual_size` with none, so that both present the same guest-visible size; that `retype --to removable` removes the footer and preserves both the guest-visible size and the inode; and that `retype --to fixed` is refused without `--force`. For `doctor`, build a fixture directory holding one of each verdict class per type (a clean fixed VHD, a fragmented one, a sparse one, a dynamic VHD and a VHDX under `.vhd` names, an ISO under and over the fragment ceiling, a real VMDK under a `.vhd`/`.vmdk` name) and assert both the per-file verdicts and the aggregate exit code, in default and `--strict` modes, without any write occurring to the fixture (verify mtimes and inode block counts are unchanged after the run).
 
 ## Out of scope
 

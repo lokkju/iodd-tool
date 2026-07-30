@@ -151,35 +151,71 @@ fn removable_defaults_to_rmd() {
     assert!(!dir.path().join("r.vhd").exists());
 }
 
-/// `.vhd` and `.rmd` are presentation only; for the same size and stamp the
-/// bytes are identical. Compared with the timestamp and UUID excluded, since
-/// those legitimately differ per invocation.
+/// `.vhd` and `.rmd` are **not** the same format, which hardware measurement
+/// established after `SPEC.md` lines 26-28 claimed otherwise.
+///
+/// The device presents a `.vhd` as file size minus 512, treating the last
+/// sector as a footer, and presents a `.rmd` whole. So for a guest to see the
+/// size that was asked for, a `.rmd` must be exactly `virtual_size` with no
+/// footer, while a `.vhd` is `virtual_size + 512` with one.
 #[test]
-fn vhd_and_rmd_differ_only_in_name() {
+fn removable_is_a_raw_image_and_fixed_is_a_vhd() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("a.vhd");
-    let b = dir.path().join("b.rmd");
+    let vhd = dir.path().join("a.vhd");
+    let rmd = dir.path().join("b.rmd");
 
-    for (path, extra) in [(&a, vec![]), (&b, vec!["--removable"])] {
-        let mut cmd = iodd();
-        cmd.args(["create", "--size", "16M", "--out", &path.to_string_lossy()]);
-        cmd.args(&extra);
-        cmd.assert().success();
-    }
+    iodd()
+        .args(["create", "--size", "16M", "--out", &vhd.to_string_lossy()])
+        .assert()
+        .success();
+    iodd()
+        .args([
+            "create",
+            "--size",
+            "16M",
+            "--out",
+            &rmd.to_string_lossy(),
+            "--removable",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("no footer"));
 
-    let fa = std::fs::read(&a).expect("read a");
-    let fb = std::fs::read(&b).expect("read b");
-    assert_eq!(fa.len(), fb.len());
+    let vhd_len = std::fs::metadata(&vhd).expect("stat").len();
+    let rmd_len = std::fs::metadata(&rmd).expect("stat").len();
 
-    let base = fa.len() - footer::FOOTER_SIZE;
-    // Footer bytes 24..28 are the timestamp and 68..84 the UUID.
-    for range in [0..24usize, 32..64, 84..footer::FOOTER_SIZE] {
-        assert_eq!(
-            fa[base + range.start..base + range.end],
-            fb[base + range.start..base + range.end],
-            "footer bytes {range:?} must match"
-        );
-    }
+    assert_eq!(vhd_len, 16 * 1024 * 1024 + 512, "a .vhd carries a footer");
+    assert_eq!(rmd_len, 16 * 1024 * 1024, "a .rmd does not");
+
+    // The point of the difference: both give the guest exactly 16 MiB.
+    assert_eq!(vhd_len - 512, rmd_len, "guest-visible sizes must match");
+
+    // And the .rmd really has no footer where one would be.
+    let tail = std::fs::read(&rmd).expect("read");
+    assert_ne!(
+        &tail[tail.len() - 512..tail.len() - 504],
+        b"conectix",
+        "a raw removable image must not end in a VHD footer"
+    );
+}
+
+/// An explicit `.rmd` name gets raw treatment even without `--removable`, since
+/// the device decides by extension and nothing else.
+#[test]
+fn an_explicit_rmd_extension_also_means_raw() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("explicit.rmd");
+
+    iodd()
+        .args(["create", "--size", "16M", "--out", &out.to_string_lossy()])
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::metadata(&out).expect("stat").len(),
+        16 * 1024 * 1024,
+        "an .rmd is raw however it was requested"
+    );
 }
 
 #[test]
