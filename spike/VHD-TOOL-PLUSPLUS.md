@@ -181,12 +181,22 @@ check.)
 
 ## Open questions this raises
 
-1. **Should `create` offer a `--no-zero` fast path?** D5 made zeroing mandatory
-   on the strength of the S1 leak. That reasoning is unchanged and V1 reinforces
-   that the hazard is real. But the official tool does not zero, users are
-   accustomed to instant creation, and a 200 GiB image would take roughly six
-   minutes to zero at the measured rate. A flag with a loud warning would match
-   vendor behaviour while keeping the safe default. **Needs a decision.**
+1. ~~Should `create` offer a `--no-zero` fast path?~~ **Decided 2026-07-30:
+   zeroing is off by default with a warning, `--zero` opts in.** Recorded as
+   D9, superseding D5. Matching vendor behaviour won: instant creation is the
+   point of the tool.
+
+   One asymmetry worth keeping in view, since it is the strongest argument the
+   other way and it did not decide the question. On Windows,
+   `SetFileValidData` requires `SE_MANAGE_VOLUME`; Microsoft gates it precisely
+   because it exposes deleted data, so VHD Tool++ needs elevation. On Linux
+   `fallocate` needs no privilege at all, so `iodd` makes the same exposure
+   available unelevated. The practical impact is limited — the operator already
+   owns the volume — but the exposure reaches further than the operator: an
+   IODD gets handed to other people and booted on other machines, and a guest
+   reading unwritten regions of the virtual disk sees deleted contents of the
+   host volume. The warning text should say that plainly rather than
+   gesturing at it.
 
 2. **Should we enforce or warn about the 12 MB minimum?** Cheap to add as a
    warning. Worth confirming against the hardware first, since a tool-imposed
