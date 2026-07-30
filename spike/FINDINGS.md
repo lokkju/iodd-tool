@@ -364,6 +364,16 @@ Linking libntfs-3g makes the combined work GPL-2.0-or-later. PolyForm Shield
    that implies on a volume holding real data.
 4. **Do none of it** and ship verify-and-refuse per D8.
 
+### Licensing researched separately
+
+The GPL question raised here is analysed in
+[`docs/licensing-libntfs-3g.md`](../docs/licensing-libntfs-3g.md). Headline:
+copyright in libntfs-3g is **not** held by Tuxera as assumed here — it is
+distributed across at least six individuals — and while the derivative-work
+question is genuinely unsettled, PolyForm Shield is the worst license from
+which to test it, because no FOSS-exception path exists for a non-OSI license
+and GPLv2 §6 makes the incompatibility incurable.
+
 ### Bearing on the design
 
 The `ntfsmove` test in S8 is now the pivot rather than a curiosity. If it
