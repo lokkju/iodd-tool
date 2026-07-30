@@ -303,10 +303,14 @@ impl std::fmt::Display for FooterProblem {
         match self {
             Self::BadCookie { found } => {
                 if found == b"EFI PART" {
+                    // Do not assert *why*. A guest partitioning a VHD overwrites
+                    // the footer with its backup GPT, but a raw disk image that
+                    // never had a footer looks identical from here.
                     return write!(
                         f,
-                        "no VHD footer: the last sector is a GPT backup header, so a guest \
-                         partitioned this disk and overwrote it"
+                        "no VHD footer: the last sector is a GPT backup header. Either a \
+                         guest partitioned this disk and overwrote the footer, or the file \
+                         is a raw image that never had one"
                     );
                 }
                 if found.iter().all(|&b| b == 0) {
@@ -823,7 +827,14 @@ mod tests {
         let mut gpt = [0u8; FOOTER_SIZE];
         gpt[0..8].copy_from_slice(b"EFI PART");
         let (_, p) = parse(&gpt, None);
-        assert!(p[0].to_string().contains("GPT backup header"));
+        let text = p[0].to_string();
+        assert!(text.contains("GPT backup header"));
+        // It must offer the alternative rather than assert a history it cannot
+        // know: a raw image that never had a footer looks the same from here.
+        assert!(
+            text.contains("raw image"),
+            "must not claim a cause it cannot observe: {text}"
+        );
 
         let (_, p) = parse(&[0u8; FOOTER_SIZE], None);
         assert!(p[0].to_string().contains("all zeros"));

@@ -3,7 +3,9 @@
 //! No table crate: `SPEC.md` line 185 keeps the dependency list deliberately
 //! short, and column widths are a dozen lines.
 
-use crate::cmd::doctor::{Assessment, FileFacts, Verdict};
+use crate::cmd::doctor::{
+    Assessment, DirectoryFinding, FileFacts, MAX_ITEMS_PER_DIRECTORY, Verdict,
+};
 use crate::size;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -58,16 +60,52 @@ impl Record {
     }
 }
 
-pub fn render_json(records: &[Record]) {
-    match serde_json::to_string_pretty(records) {
+/// A directory the device cannot fully list.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirRecord {
+    pub path: PathBuf,
+    pub items: usize,
+    pub limit: usize,
+    pub reason: String,
+}
+
+impl From<&DirectoryFinding> for DirRecord {
+    fn from(f: &DirectoryFinding) -> Self {
+        Self {
+            path: f.path.clone(),
+            items: f.items,
+            limit: MAX_ITEMS_PER_DIRECTORY,
+            reason: format!(
+                "{} items exceeds the device's limit of {MAX_ITEMS_PER_DIRECTORY} per \
+                 directory; files beyond it will not appear in the on-screen list. \
+                 Move some into subfolders, which the limit does not count across.",
+                f.items
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Report<'a> {
+    files: &'a [Record],
+    directories: Vec<DirRecord>,
+}
+
+pub fn render_json(records: &[Record], dirs: &[DirectoryFinding]) {
+    let report = Report {
+        files: records,
+        directories: dirs.iter().map(DirRecord::from).collect(),
+    };
+    match serde_json::to_string_pretty(&report) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("iodd: could not render JSON: {e}"),
     }
 }
 
-pub fn render_table(records: &[Record]) {
+pub fn render_table(records: &[Record], dirs: &[DirectoryFinding]) {
     if records.is_empty() {
         println!("no IODD-mountable files found");
+        print_directory_findings(dirs);
         return;
     }
 
@@ -101,6 +139,31 @@ pub fn render_table(records: &[Record]) {
     }
 
     print_summary(records);
+    print_directory_findings(dirs);
+}
+
+/// Over-full directories hide files rather than breaking them, so they are
+/// reported apart from the per-file verdicts: every file listed above may be
+/// perfectly good and still be invisible on the device.
+fn print_directory_findings(dirs: &[DirectoryFinding]) {
+    if dirs.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{} director{} over the device's {MAX_ITEMS_PER_DIRECTORY}-item limit:",
+        dirs.len(),
+        if dirs.len() == 1 { "y" } else { "ies" }
+    );
+    for d in dirs {
+        println!("  {} — {} items", d.path.display(), d.items);
+    }
+    println!();
+    println!(
+        "Files past the first {MAX_ITEMS_PER_DIRECTORY} will not appear in the on-screen list, \
+         however sound they are."
+    );
+    println!("Move some into subfolders; the limit counts per directory, not per drive.");
 }
 
 fn print_summary(records: &[Record]) {

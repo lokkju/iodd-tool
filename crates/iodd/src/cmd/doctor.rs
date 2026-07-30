@@ -32,6 +32,17 @@ use std::path::{Path, PathBuf};
 /// is overridable because it was never documented, only inferred.
 pub const DEFAULT_ISO_MAX_FRAGMENTS: u32 = 24;
 
+/// Most items the device will show in a single directory.
+///
+/// Vendor documentation: "the number of files or subfolders within any single
+/// directory (that contains ISO/VHD/IMA files) must not exceed 32 items", and
+/// "you can bypass the 32-item limit by organizing your files into subfolders".
+///
+/// Exceeding it does not corrupt anything — the device simply stops listing,
+/// so a file that copied perfectly is missing from the menu. That is exactly
+/// the confusion `doctor` exists to explain.
+pub const MAX_ITEMS_PER_DIRECTORY: usize = 32;
+
 /// Extensions IODD will attempt to mount.
 ///
 /// `.ima` only, deliberately. `SPEC.md` line 146 mentions `.img`, `.bif` and
@@ -111,6 +122,23 @@ impl Verdict {
     pub fn is_failure(self) -> bool {
         matches!(self, Self::WillNotMount | Self::WillNotMountMaybeUnlisted)
     }
+}
+
+/// A directory holding mountable files, and whether the device can list all of
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryFinding {
+    pub path: PathBuf,
+    pub items: usize,
+}
+
+/// Check a directory's item count. Pure, like [`grade`].
+#[must_use]
+pub fn check_directory(path: &Path, items: usize) -> Option<DirectoryFinding> {
+    (items > MAX_ITEMS_PER_DIRECTORY).then(|| DirectoryFinding {
+        path: path.to_path_buf(),
+        items,
+    })
 }
 
 /// A graded file.
@@ -305,6 +333,11 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
     }
 
     let mut records: Vec<Record> = Vec::new();
+    // Directories holding at least one mountable file, and how many entries
+    // each holds in total. The device's limit counts subfolders too.
+    let mut dirs_with_images: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
+
     let walker = walkdir::WalkDir::new(root)
         .max_depth(if policy.recursive { usize::MAX } else { 1 })
         .follow_links(false);
@@ -325,6 +358,10 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
             continue;
         }
 
+        if let Some(parent) = path.parent() {
+            dirs_with_images.insert(parent.to_path_buf());
+        }
+
         match gather(path, ext) {
             Ok(facts) => {
                 let assessment = grade(&facts, &policy);
@@ -334,14 +371,22 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
         }
     }
 
+    let dir_findings: Vec<DirectoryFinding> = dirs_with_images
+        .iter()
+        .filter_map(|d| {
+            let items = std::fs::read_dir(d).ok()?.count();
+            check_directory(d, items)
+        })
+        .collect();
+
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
     match args.format {
-        crate::cli::Format::Json => report::render_json(&records),
-        crate::cli::Format::Table => report::render_table(&records),
+        crate::cli::Format::Json => report::render_json(&records, &dir_findings),
+        crate::cli::Format::Table => report::render_table(&records, &dir_findings),
     }
 
-    Ok(exit_code(&records, policy.strict))
+    Ok(exit_code(&records, &dir_findings, policy.strict))
 }
 
 /// Aggregate exit: 0 when everything mounts, 4 when anything will not, and
@@ -349,10 +394,15 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
 ///
 /// Reuses the contiguity code rather than inventing one, per design revision
 /// 11.
-fn exit_code(records: &[Record], strict: bool) -> u8 {
+fn exit_code(records: &[Record], dirs: &[DirectoryFinding], strict: bool) -> u8 {
     if records.iter().any(|r| r.verdict.is_none()) {
         // Unreadable files are a usage-level problem, not a device verdict.
         return 1;
+    }
+    // An over-full directory hides files rather than breaking them, so it is a
+    // warning: everything present still mounts, but not everything is reachable.
+    if strict && !dirs.is_empty() {
+        return 4;
     }
     match records.iter().filter_map(|r| r.verdict).max() {
         Some(v) if v.is_failure() => 4,
@@ -630,6 +680,21 @@ mod tests {
         }
         assert!(!policy.accepts("exe"));
         assert!(!policy.accepts("img"), "revision 9: .img is not scanned");
+    }
+
+    // ---- directory item limit ----------------------------------------------
+
+    #[test]
+    fn a_directory_at_the_limit_is_fine() {
+        assert_eq!(check_directory(Path::new("/x/_ISO"), 32), None);
+        assert_eq!(check_directory(Path::new("/x/_ISO"), 1), None);
+    }
+
+    #[test]
+    fn a_directory_over_the_limit_is_reported() {
+        let f = check_directory(Path::new("/x/_ISO"), 33).expect("should fire");
+        assert_eq!(f.items, 33);
+        assert_eq!(f.path, Path::new("/x/_ISO"));
     }
 
     // ---- verdict ordering --------------------------------------------------

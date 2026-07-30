@@ -231,7 +231,8 @@ fn json_output_is_parseable_and_has_stable_fields() {
     ] {
         assert!(text.contains(field), "missing {field} in {text}");
     }
-    assert!(text.trim_start().starts_with('['), "must be a JSON array");
+    assert!(text.trim_start().starts_with('{'), "must be a JSON object");
+    assert!(text.contains("\"files\""), "files array must be present");
 }
 
 /// `SPEC.md` line 150: doctor never modifies, renames, or deletes anything.
@@ -305,4 +306,77 @@ fn the_summary_counts_by_verdict() {
         .stdout(contains("2 file(s):"))
         .stdout(contains("mountable"))
         .stdout(contains("warn"));
+}
+
+/// The vendor documents a 32-item limit per directory containing images.
+/// Exceeding it does not break the files — the device simply stops listing
+/// them, so a file that copied perfectly is missing from the menu.
+#[test]
+fn an_over_full_directory_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("_ISO");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    for i in 0..40 {
+        write_raw(&sub.join(format!("i{i:03}.iso")), 4096, 0x10);
+    }
+
+    iodd()
+        .args(["doctor", &dir.path().to_string_lossy()])
+        .assert()
+        .success()
+        .stdout(contains("32-item limit"))
+        .stdout(contains("40 items"));
+}
+
+#[test]
+fn a_directory_at_the_limit_is_not_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("_ISO");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    for i in 0..32 {
+        write_raw(&sub.join(format!("i{i:03}.iso")), 4096, 0x10);
+    }
+
+    let out = iodd()
+        .args(["doctor", &dir.path().to_string_lossy()])
+        .output()
+        .expect("run");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("32-item limit"),
+        "exactly 32 is within the limit"
+    );
+}
+
+#[test]
+fn strict_fails_on_an_over_full_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("_ISO");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    for i in 0..40 {
+        write_raw(&sub.join(format!("i{i:03}.iso")), 4096, 0x10);
+    }
+
+    iodd()
+        .args(["doctor", &dir.path().to_string_lossy(), "--strict"])
+        .assert()
+        .code(4);
+}
+
+#[test]
+fn directory_findings_appear_in_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("_ISO");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    for i in 0..40 {
+        write_raw(&sub.join(format!("i{i:03}.iso")), 4096, 0x10);
+    }
+
+    let out = iodd()
+        .args(["doctor", &dir.path().to_string_lossy(), "--format", "json"])
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    for field in ["\"files\"", "\"directories\"", "\"items\"", "\"limit\""] {
+        assert!(text.contains(field), "missing {field}");
+    }
 }
