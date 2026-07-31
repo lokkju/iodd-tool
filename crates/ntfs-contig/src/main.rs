@@ -68,7 +68,8 @@ fn exit_code(err: &Error) -> u8 {
         Error::Fragmented { .. } => 4,
         Error::Sparse { .. } | Error::Uninitialized { .. } => 5,
         Error::Compressed { .. } => 6,
-        Error::Unverifiable { .. } => 8,
+        // Both mean "the question could not be answered", not "the answer is no".
+        Error::Unverifiable { .. } | Error::VolumeUnreadable { .. } => 8,
     }
 }
 

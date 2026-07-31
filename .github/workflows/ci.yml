@@ -30,6 +30,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # mkntfs and ntfsinfo let tests/volume_real.rs build a genuine NTFS
+      # filesystem in an image file and cross-check the volume-state parser
+      # against an independent implementation. No root and no device needed;
+      # without these the tests skip silently and prove nothing.
+      - name: Install ntfsprogs
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+
       - name: Run tests
         run: cargo test --workspace
 

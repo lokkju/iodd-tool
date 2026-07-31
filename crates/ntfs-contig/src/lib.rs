@@ -39,6 +39,7 @@ pub mod alloc;
 pub mod error;
 pub mod extents;
 pub mod fsinfo;
+pub mod volume;
 
 pub use error::{Error, Result, Run};
 pub use extents::{Extent, ExtentMap};
