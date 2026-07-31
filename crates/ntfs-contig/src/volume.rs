@@ -392,6 +392,34 @@ pub fn read(dev: &Path) -> Result<VolumeInfo> {
     parse_volume_record(&mut record, bs.bytes_per_sector, dev)
 }
 
+/// Work out what to actually read, given whatever path the user supplied.
+///
+/// A block device or a regular file is read as-is — the latter so an image
+/// can be inspected without `losetup`. Anything else is taken to be a path on
+/// a mounted volume and resolved to the device beneath it.
+///
+/// # Errors
+///
+/// [`Error::Io`] if the path cannot be stat'd, and [`Error::VolumeUnreadable`]
+/// if it resolves to no block device.
+pub fn resolve(path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let md = std::fs::metadata(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if md.file_type().is_block_device() || md.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    backing_device(path).ok_or_else(|| {
+        unreadable(
+            path,
+            "not backed by a block device; pass the device directly",
+        )
+    })
+}
+
 /// The block device backing the filesystem that `path` lives on.
 ///
 /// Resolved through `/sys/dev/block/<major>:<minor>`, so it reflects what the
