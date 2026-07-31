@@ -95,6 +95,26 @@ udisksctl unmount -b /dev/sdX1     # before using the device's own controls
 entirely — a read-only mount does not set the dirty flag. Only `create` and
 `convert` need write access.
 
+### Diagnosing it
+
+When a volume will not mount there is no mounted view left to interrogate, and
+ntfs3 publishes nothing under `/sys/fs`, so the flag has to be read off the
+device:
+
+```
+sudo iodd doctor /dev/sdb1          # 0 clean, 4 dirty
+sudo ntfs-contig volume /dev/sdb1   # same reading, without the IODD framing
+```
+
+Both need read access to the block device, so root or the `disk` group. Given a
+mounted path instead, `doctor` resolves the device beneath it and folds volume
+state into the ordinary report; without permission to read the device it stays
+quiet rather than failing the audit.
+
+A dirty volume exits 4 — not a warning about what might go wrong, but the
+volume declining to mount next time it is attached, which makes every file on
+it unreachable however sound.
+
 ## Platform
 
 Linux only. Relies on `fallocate(2)`, `FS_IOC_FIEMAP`, and `fstat(2)`, none of

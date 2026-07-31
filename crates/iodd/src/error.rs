@@ -113,6 +113,8 @@ impl From<ntfs_contig::Error> for Error {
             E::Uninitialized { path } => Error::Uninitialized { path },
             E::Compressed { path } => Error::Compressed { path },
             E::Unverifiable { path, reason } => Error::Unverifiable { path, reason },
+            // "Could not determine", same class as Unverifiable, same exit code.
+            E::VolumeUnreadable { path, reason } => Error::Unverifiable { path, reason },
         }
     }
 }

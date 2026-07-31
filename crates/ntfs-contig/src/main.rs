@@ -35,6 +35,26 @@ enum Command {
         #[arg(long)]
         report_only: bool,
     },
+
+    /// Report NTFS volume state, including the dirty flag that stops a volume
+    /// mounting
+    ///
+    /// Reads the device directly, because a volume that will not mount has no
+    /// mounted view left to ask. Needs read access to the block device, which
+    /// usually means root or the `disk` group.
+    Volume {
+        /// Block device, image file, or any path on a mounted NTFS volume
+        #[arg(required = true)]
+        targets: Vec<PathBuf>,
+
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+
+        /// Report only; never exit non-zero for a dirty volume
+        #[arg(long)]
+        report_only: bool,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -68,7 +88,8 @@ fn exit_code(err: &Error) -> u8 {
         Error::Fragmented { .. } => 4,
         Error::Sparse { .. } | Error::Uninitialized { .. } => 5,
         Error::Compressed { .. } => 6,
-        Error::Unverifiable { .. } => 8,
+        // Both mean "the question could not be answered", not "the answer is no".
+        Error::Unverifiable { .. } | Error::VolumeUnreadable { .. } => 8,
     }
 }
 
@@ -79,7 +100,83 @@ fn run(cli: Cli) -> Result<u8, Error> {
             json,
             report_only,
         } => verify(&paths, json, report_only),
+        Command::Volume {
+            targets,
+            json,
+            report_only,
+        } => volume(&targets, json, report_only),
     }
+}
+
+/// A dirty volume exits 4: it is not a warning about something that might go
+/// wrong, it is the volume declining to mount next time it is attached.
+fn volume(targets: &[PathBuf], json: bool, report_only: bool) -> Result<u8, Error> {
+    use ntfs_contig::volume as vol;
+
+    let mut worst: u8 = 0;
+    let mut records = Vec::new();
+
+    for target in targets {
+        let device = vol::resolve(target)?;
+        let info = vol::read(&device)?;
+
+        if json {
+            records.push(format!(
+                r#"{{"target":{},"device":{},"label":{},"version":"{}.{}","flags":{},"flag_names":[{}],"dirty":{}}}"#,
+                serde_json::Value::String(target.display().to_string()),
+                serde_json::Value::String(device.display().to_string()),
+                info.label.as_ref().map_or_else(
+                    || "null".to_owned(),
+                    |l| serde_json::Value::String(l.clone()).to_string()
+                ),
+                info.major,
+                info.minor,
+                info.flags,
+                info.flag_names()
+                    .iter()
+                    .map(|n| format!("\"{n}\""))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                info.is_dirty(),
+            ));
+        } else {
+            println!("{}", target.display());
+            if device != *target {
+                println!("  device        {}", device.display());
+            }
+            println!(
+                "  label         {}",
+                info.label.as_deref().unwrap_or("(none)")
+            );
+            println!("  ntfs version  {}.{}", info.major, info.minor);
+            let names = info.flag_names();
+            println!(
+                "  flags         0x{:04x}{}",
+                info.flags,
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", names.join(", "))
+                }
+            );
+            if info.is_dirty() {
+                println!(
+                    "  DIRTY: this volume will not mount until the flag is cleared.\n         \
+                     Clear it with `ntfsfix -d {}`, or chkdsk on Windows.",
+                    device.display()
+                );
+            }
+        }
+
+        if !report_only && info.is_dirty() {
+            worst = worst.max(4);
+        }
+    }
+
+    if json {
+        println!("[{}]", records.join(","));
+    }
+    Ok(worst)
 }
 
 fn verify(paths: &[PathBuf], json: bool, report_only: bool) -> Result<u8, Error> {

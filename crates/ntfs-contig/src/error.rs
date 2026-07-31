@@ -53,6 +53,11 @@ pub enum Error {
 
     #[error("could not verify contiguity of {path}: {reason}")]
     Unverifiable { path: PathBuf, reason: String },
+
+    /// The device is not a legible NTFS volume. Distinct from [`Error::Io`]:
+    /// the read succeeded, but what came back could not be interpreted.
+    #[error("could not read NTFS volume state from {path}: {reason}")]
+    VolumeUnreadable { path: PathBuf, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
