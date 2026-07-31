@@ -36,6 +36,55 @@ enum Command {
         report_only: bool,
     },
 
+    /// Copy a file into a contiguous, fully-allocated target
+    ///
+    /// Byte-for-byte: no knowledge of disk image formats, so no chance of
+    /// misreading one. Holes in the source are written out by default,
+    /// because a reservation that was never written holds stale clusters to
+    /// anything reading raw sectors.
+    Copy {
+        /// Source file
+        source: PathBuf,
+
+        /// Target path
+        dest: PathBuf,
+
+        /// Overwrite an existing target
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the source's holes instead of writing them out
+        ///
+        /// Much faster on a mostly-empty image, and unsafe when the source's
+        /// holes carry meaning: the target keeps whatever was on those
+        /// clusters rather than zeros.
+        #[arg(long)]
+        sparse: bool,
+
+        /// On failure, leave the partial target in place
+        #[arg(long)]
+        keep_on_fail: bool,
+    },
+
+    /// Re-place an existing file so it occupies one extent, keeping its name
+    ///
+    /// Copies through a temporary beside it and renames over the original.
+    /// Not a defragmenter: it cannot move other files, so it needs a
+    /// contiguous free run at least as large as the file.
+    Fix {
+        /// Files to re-place
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        /// Skip holes instead of writing them out
+        #[arg(long)]
+        sparse: bool,
+
+        /// On failure, leave the partial target in place
+        #[arg(long)]
+        keep_on_fail: bool,
+    },
+
     /// Report NTFS volume state, including the dirty flag that stops a volume
     /// mounting
     ///
@@ -105,7 +154,68 @@ fn run(cli: Cli) -> Result<u8, Error> {
             json,
             report_only,
         } => volume(&targets, json, report_only),
+        Command::Copy {
+            source,
+            dest,
+            force,
+            sparse,
+            keep_on_fail,
+        } => {
+            let opts = ntfs_contig::copy::Options {
+                force,
+                sparse,
+                keep_on_fail,
+            };
+            let mut bar = progress_for(&format!("copying {}", dest.display()));
+            let r = ntfs_contig::copy::copy(&source, &dest, &opts, bar.as_mut())?;
+            report_copy(&dest, &r);
+            Ok(0)
+        }
+        Command::Fix {
+            paths,
+            sparse,
+            keep_on_fail,
+        } => {
+            let opts = ntfs_contig::copy::Options {
+                force: false,
+                sparse,
+                keep_on_fail,
+            };
+            for path in &paths {
+                let mut bar = progress_for(&format!("re-placing {}", path.display()));
+                let r = ntfs_contig::copy::fix(path, &opts, bar.as_mut())?;
+                if r.written == 0 && r.holes_skipped == 0 {
+                    println!("{}: already contiguous, left alone", path.display());
+                } else {
+                    report_copy(path, &r);
+                }
+            }
+            Ok(0)
+        }
     }
+}
+
+/// A progress bar when attached to a terminal, and nothing otherwise, so
+/// piped output stays clean.
+fn progress_for(label: &str) -> Box<dyn ntfs_contig::alloc::Progress> {
+    ntfs_contig::alloc::TtyProgress::new(label.to_owned()).map_or_else(
+        || Box::new(ntfs_contig::alloc::NoProgress) as Box<dyn ntfs_contig::alloc::Progress>,
+        |p| Box::new(p) as Box<dyn ntfs_contig::alloc::Progress>,
+    )
+}
+
+fn report_copy(path: &std::path::Path, r: &ntfs_contig::copy::Report) {
+    println!("{}", path.display());
+    println!("  bytes         {}", r.bytes);
+    println!("  written       {}", r.written);
+    if r.holes_skipped > 0 {
+        println!("  holes skipped {}", r.holes_skipped);
+        println!(
+            "  note: those regions were reserved but never written, so they hold\n        \
+             whatever was previously on those clusters, not zeros."
+        );
+    }
+    println!("  contiguous    yes (1 extent)");
 }
 
 /// A dirty volume exits 4: it is not a warning about something that might go
