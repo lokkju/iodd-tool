@@ -326,7 +326,8 @@ pub fn parse_volume_record(
                 .ok_or_else(|| unreadable(path, "attribute truncated"))?
                 as usize;
             let voff = usize::from(
-                u16_at(record, off + 0x14).ok_or_else(|| unreadable(path, "attribute truncated"))?,
+                u16_at(record, off + 0x14)
+                    .ok_or_else(|| unreadable(path, "attribute truncated"))?,
             );
             let value = record
                 .get(off + voff..off + voff + vlen)

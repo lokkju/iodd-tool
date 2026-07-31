@@ -73,6 +73,16 @@ else
 fi
 echo
 
+echo '=== 4b. iodd doctor pointed straight at the device ==='
+# The one code path that cannot be covered without a real block device.
+if [ -x "$REPO/target/debug/iodd" ]; then
+  sudo "$REPO/target/debug/iodd" doctor "$LOOP"
+  echo "  exit=$?  (0 clean, 4 dirty)"
+else
+  echo "  build first: cargo build -p iodd"
+fi
+echo
+
 echo "=== 5. comparison: ntfs-3g, which is known to set-on-mount ==="
 if command -v ntfs-3g >/dev/null; then
   if sudo ntfs-3g "$LOOP" "$MNT" 2>/dev/null; then

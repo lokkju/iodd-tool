@@ -25,7 +25,7 @@ use crate::cli::DoctorArgs;
 use crate::error::{Error, Result};
 use crate::footer;
 use crate::report::{self, Record};
-use ntfs_contig::extents;
+use ntfs_contig::{extents, volume};
 use std::path::{Path, PathBuf};
 
 /// Default fragment ceiling for ISO images. Device families differ; the value
@@ -139,6 +139,47 @@ pub fn check_directory(path: &Path, items: usize) -> Option<DirectoryFinding> {
         path: path.to_path_buf(),
         items,
     })
+}
+
+/// Volume-level state, reported once for the whole scan.
+///
+/// Every file on the device can be flawless and still be unreachable, because
+/// the volume itself will not mount. That outranks any per-file verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeFinding {
+    pub device: PathBuf,
+    pub label: Option<String>,
+    pub flags: Vec<String>,
+    pub dirty: bool,
+}
+
+/// Grade volume state. Pure, like [`grade`] and [`check_directory`].
+///
+/// `None` when nothing is set, which is the normal case.
+#[must_use]
+pub fn check_volume(device: &Path, info: &volume::VolumeInfo) -> Option<VolumeFinding> {
+    let flags = info.flag_names();
+    (!flags.is_empty()).then(|| VolumeFinding {
+        device: device.to_path_buf(),
+        label: info.label.clone(),
+        flags: flags.into_iter().map(str::to_owned).collect(),
+        dirty: info.is_dirty(),
+    })
+}
+
+/// Best-effort volume state for the tree being scanned.
+///
+/// `None` for every failure: no backing block device, no read access (the
+/// usual case, since this needs root or the `disk` group), or not NTFS. An
+/// audit that cannot open `/dev/sdb1` is still a useful audit, so this must
+/// never turn a successful scan into an error.
+///
+/// Reads the device rather than asking the mounted filesystem because there
+/// is nothing to ask: ntfs3 publishes no volume flags, and by the time the
+/// flag matters the volume will not mount at all.
+fn gather_volume(root: &Path) -> Option<VolumeFinding> {
+    let device = volume::resolve(root).ok()?;
+    check_volume(&device, &volume::read(&device).ok()?)
 }
 
 /// A graded file.
@@ -381,6 +422,14 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
     }
 
     let root = args.root.as_path();
+
+    // A block device is the one case where there is no tree to walk: the
+    // volume will not mount, which is exactly why someone is asking. Report
+    // what can be read about the volume itself and stop.
+    if is_block_device(root) {
+        return volume_only(root, args.format);
+    }
+
     if !root.is_dir() {
         return Err(Error::Usage(format!(
             "{} is not a directory",
@@ -437,12 +486,43 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
 
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
+    let vol = gather_volume(root);
+
     match args.format {
-        crate::cli::Format::Json => report::render_json(&records, &dir_findings),
-        crate::cli::Format::Table => report::render_table(&records, &dir_findings),
+        crate::cli::Format::Json => report::render_json(&records, &dir_findings, vol.as_ref()),
+        crate::cli::Format::Table => report::render_table(&records, &dir_findings, vol.as_ref()),
     }
 
-    Ok(exit_code(&records, &dir_findings, policy.strict))
+    Ok(exit_code(
+        &records,
+        &dir_findings,
+        vol.as_ref(),
+        policy.strict,
+    ))
+}
+
+#[must_use]
+fn is_block_device(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
+}
+
+/// `iodd doctor /dev/sdb1` — volume state only, for a volume with no
+/// mountpoint to point at.
+///
+/// Errors propagate here rather than being swallowed as they are during a
+/// tree scan: the caller named this device explicitly, so "could not read it"
+/// is the answer to their question, not an incidental gap in an audit.
+fn volume_only(device: &Path, format: crate::cli::Format) -> Result<u8> {
+    let info = volume::read(device)?;
+    let finding = check_volume(device, &info);
+
+    match format {
+        crate::cli::Format::Json => report::render_json(&[], &[], finding.as_ref()),
+        crate::cli::Format::Table => report::render_volume_only(device, &info, finding.as_ref()),
+    }
+
+    Ok(u8::from(info.is_dirty()) * 4)
 }
 
 /// Aggregate exit: 0 when everything mounts, 4 when anything will not, and
@@ -450,7 +530,18 @@ pub fn run(args: &DoctorArgs) -> Result<u8> {
 ///
 /// Reuses the contiguity code rather than inventing one, per design revision
 /// 11.
-fn exit_code(records: &[Record], dirs: &[DirectoryFinding], strict: bool) -> u8 {
+fn exit_code(
+    records: &[Record],
+    dirs: &[DirectoryFinding],
+    vol: Option<&VolumeFinding>,
+    strict: bool,
+) -> u8 {
+    // A dirty volume outranks everything below it. It is not a warning about
+    // what might go wrong: the volume will not mount next time it is
+    // attached, which makes every file on it unreachable however sound.
+    if vol.is_some_and(|v| v.dirty) {
+        return 4;
+    }
     if records.iter().any(|r| r.verdict.is_none()) {
         // Unreadable files are a usage-level problem, not a device verdict.
         return 1;
@@ -814,5 +905,95 @@ mod tests {
         assert!(Verdict::Mountable < Verdict::Warn);
         assert!(Verdict::Warn < Verdict::WillNotMount);
         assert!(Verdict::WillNotMount < Verdict::WillNotMountMaybeUnlisted);
+    }
+
+    // ---- volume state ------------------------------------------------------
+
+    fn vol_info(flags: u16) -> volume::VolumeInfo {
+        volume::VolumeInfo {
+            label: Some("IODD".to_owned()),
+            major: 3,
+            minor: 1,
+            flags,
+        }
+    }
+
+    fn dev() -> &'static Path {
+        Path::new("/dev/sdb1")
+    }
+
+    #[test]
+    fn a_clean_volume_produces_no_finding() {
+        assert_eq!(check_volume(dev(), &vol_info(0)), None);
+    }
+
+    #[test]
+    fn a_dirty_volume_is_reported() {
+        let f = check_volume(dev(), &vol_info(volume::VOLUME_IS_DIRTY)).expect("should fire");
+        assert!(f.dirty);
+        assert_eq!(f.flags, vec!["dirty"]);
+        assert_eq!(f.device, dev());
+        assert_eq!(f.label.as_deref(), Some("IODD"));
+    }
+
+    /// Flags other than dirty are worth surfacing but do not stop a mount, so
+    /// they must not be reported as dirty.
+    #[test]
+    fn a_non_dirty_flag_is_reported_without_claiming_dirty() {
+        let f =
+            check_volume(dev(), &vol_info(volume::VOLUME_MODIFIED_BY_CHKDSK)).expect("should fire");
+        assert!(!f.dirty);
+        assert_eq!(f.flags, vec!["modified-by-chkdsk"]);
+    }
+
+    // ---- exit codes --------------------------------------------------------
+
+    fn clean_record() -> Record {
+        let f = facts("vhd");
+        Record::new(&f, &grade_default(&f))
+    }
+
+    #[test]
+    fn a_clean_scan_exits_zero() {
+        assert_eq!(exit_code(&[clean_record()], &[], None, false), 0);
+    }
+
+    /// The point of the whole volume check: every file can be perfect and the
+    /// device still unusable, because the volume will not mount.
+    #[test]
+    fn a_dirty_volume_fails_the_scan_even_when_every_file_is_sound() {
+        let vol = check_volume(dev(), &vol_info(volume::VOLUME_IS_DIRTY)).expect("dirty");
+        assert_eq!(exit_code(&[clean_record()], &[], Some(&vol), false), 4);
+        assert_eq!(
+            exit_code(&[clean_record()], &[], Some(&vol), true),
+            4,
+            "and under --strict too"
+        );
+    }
+
+    #[test]
+    fn a_non_dirty_volume_flag_does_not_fail_the_scan() {
+        let vol = check_volume(dev(), &vol_info(volume::VOLUME_MODIFIED_BY_CHKDSK)).expect("flag");
+        assert_eq!(
+            exit_code(&[clean_record()], &[], Some(&vol), false),
+            0,
+            "chkdsk having touched the volume does not stop it mounting"
+        );
+    }
+
+    /// Not being able to read the device is the common case without root. It
+    /// must not change the verdict of an otherwise successful audit.
+    #[test]
+    fn an_unreadable_volume_leaves_the_verdict_alone() {
+        assert_eq!(exit_code(&[clean_record()], &[], None, false), 0);
+        assert_eq!(exit_code(&[clean_record()], &[], None, true), 0);
+    }
+
+    #[test]
+    fn gathering_volume_state_from_a_plain_directory_is_not_an_error() {
+        // A tempdir is not on an NTFS volume, so this exercises the path that
+        // has to stay quiet rather than fail the scan.
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(gather_volume(dir.path()), None);
     }
 }

@@ -144,7 +144,10 @@ fn volume(targets: &[PathBuf], json: bool, report_only: bool) -> Result<u8, Erro
             if device != *target {
                 println!("  device        {}", device.display());
             }
-            println!("  label         {}", info.label.as_deref().unwrap_or("(none)"));
+            println!(
+                "  label         {}",
+                info.label.as_deref().unwrap_or("(none)")
+            );
             println!("  ntfs version  {}.{}", info.major, info.minor);
             let names = info.flag_names();
             println!(

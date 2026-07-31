@@ -4,7 +4,7 @@
 //! short, and column widths are a dozen lines.
 
 use crate::cmd::doctor::{
-    Assessment, DirectoryFinding, FileFacts, MAX_ITEMS_PER_DIRECTORY, Verdict,
+    Assessment, DirectoryFinding, FileFacts, MAX_ITEMS_PER_DIRECTORY, Verdict, VolumeFinding,
 };
 use crate::size;
 use serde::Serialize;
@@ -85,16 +85,41 @@ impl From<&DirectoryFinding> for DirRecord {
     }
 }
 
+/// Volume state as it appears in `--format json`.
+#[derive(Debug, Serialize)]
+struct VolRecord {
+    device: PathBuf,
+    label: Option<String>,
+    flags: Vec<String>,
+    dirty: bool,
+}
+
+impl From<&VolumeFinding> for VolRecord {
+    fn from(v: &VolumeFinding) -> Self {
+        Self {
+            device: v.device.clone(),
+            label: v.label.clone(),
+            flags: v.flags.clone(),
+            dirty: v.dirty,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct Report<'a> {
     files: &'a [Record],
     directories: Vec<DirRecord>,
+    /// Absent when the volume could not be read, which is the usual case
+    /// without root — distinct from a volume read and found clean.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume: Option<VolRecord>,
 }
 
-pub fn render_json(records: &[Record], dirs: &[DirectoryFinding]) {
+pub fn render_json(records: &[Record], dirs: &[DirectoryFinding], vol: Option<&VolumeFinding>) {
     let report = Report {
         files: records,
         directories: dirs.iter().map(DirRecord::from).collect(),
+        volume: vol.map(VolRecord::from),
     };
     match serde_json::to_string_pretty(&report) {
         Ok(text) => println!("{text}"),
@@ -102,10 +127,11 @@ pub fn render_json(records: &[Record], dirs: &[DirectoryFinding]) {
     }
 }
 
-pub fn render_table(records: &[Record], dirs: &[DirectoryFinding]) {
+pub fn render_table(records: &[Record], dirs: &[DirectoryFinding], vol: Option<&VolumeFinding>) {
     if records.is_empty() {
         println!("no IODD-mountable files found");
         print_directory_findings(dirs);
+        print_volume_finding(vol);
         return;
     }
 
@@ -140,6 +166,58 @@ pub fn render_table(records: &[Record], dirs: &[DirectoryFinding]) {
 
     print_summary(records);
     print_directory_findings(dirs);
+    print_volume_finding(vol);
+}
+
+/// `doctor` pointed straight at a block device: no tree, just the volume.
+pub fn render_volume_only(
+    device: &Path,
+    info: &ntfs_contig::volume::VolumeInfo,
+    finding: Option<&VolumeFinding>,
+) {
+    println!("{}", device.display());
+    println!(
+        "  label         {}",
+        info.label.as_deref().unwrap_or("(none)")
+    );
+    println!("  ntfs version  {}.{}", info.major, info.minor);
+    println!("  flags         0x{:04x}", info.flags);
+    if finding.is_none() {
+        println!();
+        println!("Volume state is clean. No files were examined: pass a mounted path to");
+        println!("grade what is on it.");
+    }
+    print_volume_finding(finding);
+}
+
+/// Volume state is printed last and unindented because it outranks everything
+/// above it: a dirty volume makes every file listed unreachable.
+fn print_volume_finding(vol: Option<&VolumeFinding>) {
+    let Some(v) = vol else {
+        return;
+    };
+    println!();
+    let name = v.label.as_deref().map_or_else(
+        || v.device.display().to_string(),
+        |l| format!("{l} ({})", v.device.display()),
+    );
+
+    if v.dirty {
+        println!("VOLUME DIRTY: {name}");
+        println!();
+        println!("This volume will not mount again until the flag is cleared, however sound");
+        println!("the files above are. The IODD sets it by dropping the volume off the USB");
+        println!("bus mid-write when it switches modes, so unmount before using the device's");
+        println!("own controls.");
+        println!();
+        println!(
+            "  ntfsfix -d {}        # quick clear on Linux",
+            v.device.display()
+        );
+        println!("  chkdsk /f            # thorough, on Windows");
+    } else {
+        println!("Volume flags on {name}: {}", v.flags.join(", "));
+    }
 }
 
 /// Over-full directories hide files rather than breaking them, so they are
