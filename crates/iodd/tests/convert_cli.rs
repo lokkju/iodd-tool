@@ -305,10 +305,16 @@ fn a_raw_source_needs_no_qemu_at_all() {
         .success();
 }
 
-/// A *fixed* VHD keeps `conectix` only in its trailing footer, so re-converting
-/// one must be treated as raw rather than handed to qemu.
+/// A *dynamic* VHD carries `conectix` at offset 0 and needs unpacking; a fixed
+/// one carries it only in the trailing footer and does not. Re-converting a
+/// fixed VHD must therefore never reach qemu.
+///
+/// (This test predates the fixed-VHD classification and originally read "is
+/// treated as raw", which is no longer what happens — it now takes the verbatim
+/// copy path. What it actually guards, and still guards, is that qemu is not
+/// involved either way.)
 #[test]
-fn a_fixed_vhd_source_is_treated_as_raw() {
+fn a_fixed_vhd_source_never_reaches_qemu() {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("fixed.vhd");
     let out = dir.path().join("again.vhd");
@@ -474,4 +480,144 @@ fn without_s_zero_qemu_produces_a_sparse_file() {
         dense.blocks() * 512,
         dense.len()
     );
+}
+
+// ---- fixed-VHD sources: copy, do not reinterpret ---------------------------
+
+/// Make a fixed VHD the way `create` does, then read back its virtual size.
+fn make_vhd(dir: &Path, name: &str, size: &str) -> std::path::PathBuf {
+    let out = dir.join(name);
+    iodd()
+        .arg("create")
+        .arg("--size")
+        .arg(size)
+        .arg("--out")
+        .arg(&out)
+        .assert()
+        .success();
+    out.with_extension("vhd")
+}
+
+fn virtual_size_of(path: &Path) -> u64 {
+    let bytes = std::fs::read(path).expect("read");
+    let mut tail = [0u8; 512];
+    tail.copy_from_slice(&bytes[bytes.len() - 512..]);
+    footer::parse(&tail, None).0.virtual_size
+}
+
+/// The regression this whole change exists for.
+///
+/// `convert` used to sniff magic only at the head. A fixed VHD keeps
+/// `conectix` in its *last* sector, so it classified as raw, took the whole
+/// file as guest data, and appended a second footer — growing the virtual disk
+/// by 512 bytes with no error and a "footer valid" verdict from `verify`.
+#[test]
+fn converting_a_fixed_vhd_does_not_grow_it_by_a_sector() {
+    let dir = tempfile::tempdir().expect("dir");
+    let src = make_vhd(dir.path(), "src", "8M");
+    let src_len = std::fs::metadata(&src).expect("stat").len();
+    let dst = dir.path().join("dst");
+
+    iodd()
+        .arg("convert")
+        .arg("--source")
+        .arg(&src)
+        .arg("--out")
+        .arg(&dst)
+        .assert()
+        .success()
+        .stdout(contains("already a fixed VHD"));
+
+    let dst = dst.with_extension("vhd");
+    assert_eq!(
+        std::fs::metadata(&dst).expect("stat").len(),
+        src_len,
+        "the copy must be the same size as the source"
+    );
+    assert_eq!(
+        virtual_size_of(&dst),
+        virtual_size_of(&src),
+        "and describe the same virtual disk"
+    );
+}
+
+/// "Preserve the original" means exactly that: same UUID, same timestamp, same
+/// creator tag. A copy that mints a new identity is not a copy.
+#[test]
+fn a_same_size_conversion_is_byte_for_byte() {
+    let dir = tempfile::tempdir().expect("dir");
+    let src = make_vhd(dir.path(), "src", "4M");
+    let dst = dir.path().join("dst");
+
+    iodd()
+        .arg("convert")
+        .arg("--source")
+        .arg(&src)
+        .arg("--out")
+        .arg(&dst)
+        .assert()
+        .success()
+        .stdout(contains("footer        preserved"));
+
+    assert_eq!(
+        std::fs::read(dst.with_extension("vhd")).expect("dst"),
+        std::fs::read(&src).expect("src"),
+    );
+    assert_no_temp_files(dir.path());
+}
+
+/// Enlarging changes the virtual size, so the footer *must* be rewritten — and
+/// the source's old footer must not survive as guest data.
+#[test]
+fn enlarging_a_fixed_vhd_rewrites_the_footer_for_the_new_size() {
+    let dir = tempfile::tempdir().expect("dir");
+    let src = make_vhd(dir.path(), "src", "4M");
+    let dst = dir.path().join("dst");
+
+    iodd()
+        .arg("convert")
+        .arg("--source")
+        .arg(&src)
+        .arg("--out")
+        .arg(&dst)
+        .arg("--size")
+        .arg("8M")
+        .assert()
+        .success();
+
+    let dst = dst.with_extension("vhd");
+    assert_eq!(
+        std::fs::metadata(&dst).expect("stat").len(),
+        8 * 1024 * 1024 + 512,
+        "8 MiB of disk plus one footer, not two"
+    );
+    assert_eq!(virtual_size_of(&dst), 8 * 1024 * 1024);
+}
+
+/// A raw image has no footer, so `convert` still has to add one. This is the
+/// case the head-only sniffing got right, and it must not regress.
+#[test]
+fn a_raw_source_still_gains_a_footer() {
+    let dir = tempfile::tempdir().expect("dir");
+    let src = dir.path().join("disk.img");
+    write_patterned_raw(&src, 2 * 1024 * 1024);
+    let dst = dir.path().join("dst");
+
+    iodd()
+        .arg("convert")
+        .arg("--source")
+        .arg(&src)
+        .arg("--out")
+        .arg(&dst)
+        .assert()
+        .success()
+        .stdout(contains("converting"));
+
+    let dst = dst.with_extension("vhd");
+    assert_eq!(
+        std::fs::metadata(&dst).expect("stat").len(),
+        2 * 1024 * 1024 + 512,
+        "the footer is appended to the raw bytes"
+    );
+    assert_eq!(virtual_size_of(&dst), 2 * 1024 * 1024);
 }
