@@ -44,17 +44,56 @@ pub fn run(args: &ConvertArgs) -> Result<u8> {
     }
 
     // ---- what is it? -------------------------------------------------------
+    // Both ends matter. A container magic at offset 0 means qemu must unpack
+    // it; `conectix` in the last sector means the bytes are already a disk
+    // image with a footer on the end, and must not be taken for guest data.
     let mut head = [0u8; 512];
     let _ = std::os::unix::fs::FileExt::read_at(&src_file, &mut head, 0);
-    let kind = source::sniff(&head);
+    let mut tail = [0u8; 512];
+    if src_meta.len() >= 512 {
+        let _ = std::os::unix::fs::FileExt::read_at(&src_file, &mut tail, src_meta.len() - 512);
+    }
+    let kind = source::classify(&head, &tail, src_meta.len());
 
     let source_virtual_size = match &kind {
         SourceKind::Raw => src_meta.len(),
+        SourceKind::FixedVhd {
+            virtual_size,
+            declared_size,
+        } => {
+            if declared_size != virtual_size {
+                eprintln!(
+                    "iodd: warning: {}'s footer declares {} but the file holds {}; \
+                     trusting the file",
+                    src.display(),
+                    size::humanize(*declared_size),
+                    size::humanize(*virtual_size)
+                );
+            }
+            *virtual_size
+        }
         SourceKind::Container(name) => {
             println!("source is a {name} container; using qemu-img");
             qemu_virtual_size(src)?
         }
     };
+
+    // ---- a same-size VHD copy is a copy ------------------------------------
+    // Nothing needs interpreting: allocate contiguously and put the bytes
+    // there, footer and all. Rewriting the footer would change the disk's
+    // identity for no reason, and re-deriving its size is how the 512-byte
+    // growth bug happened.
+    if let SourceKind::FixedVhd { virtual_size, .. } = &kind {
+        let same_size = args
+            .size
+            .as_deref()
+            .map(size::parse)
+            .transpose()?
+            .is_none_or(|requested| requested == *virtual_size);
+        if same_size {
+            return copy_verbatim(src, args);
+        }
+    }
 
     if source_virtual_size == 0 {
         return Err(Error::Usage(format!("{} is empty", src.display())));
@@ -149,8 +188,12 @@ pub fn run(args: &ConvertArgs) -> Result<u8> {
     }
 
     // ---- populate ----------------------------------------------------------
+    // For a fixed VHD this copies [0, virtual_size) — the guest data, without
+    // the old footer, which a fresh one replaces below because the size changed.
     match kind {
-        SourceKind::Raw => copy_raw(&src_file, &target, source_virtual_size, src)?,
+        SourceKind::Raw | SourceKind::FixedVhd { .. } => {
+            copy_raw(&src_file, &target, source_virtual_size, src)?;
+        }
         SourceKind::Container(_) => run_qemu_convert(src, target.path())?,
     }
 
@@ -193,6 +236,50 @@ pub fn run(args: &ConvertArgs) -> Result<u8> {
         eprintln!("iodd: pass --zero if the disk may be seen by anyone else.");
     }
 
+    Ok(0)
+}
+
+/// Place an existing fixed VHD contiguously without touching a byte of it.
+///
+/// Delegates to the engine's `copy`, which has no notion of footers or virtual
+/// sizes and therefore cannot get them wrong. The result is byte-identical to
+/// the source: same UUID, same timestamp, same creator tag, same geometry.
+fn copy_verbatim(src: &Path, args: &ConvertArgs) -> Result<u8> {
+    let out = crate::cmd::create::resolve_extension(&args.out, args.removable);
+    let dir = alloc::parent_dir(&out);
+    if !dir.is_dir() {
+        return Err(Error::Usage(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+
+    println!(
+        "{} is already a fixed VHD; copying it contiguously to {}",
+        src.display(),
+        out.display()
+    );
+
+    let opts = ntfs_contig::copy::Options {
+        force: args.force,
+        // Holes must be written out: the device reads raw sectors, where a
+        // reservation that was never written holds stale clusters, not zeros.
+        sparse: false,
+        keep_on_fail: args.keep_on_fail,
+    };
+    let mut tty = TtyProgress::new("copying");
+    let mut none = NoProgress;
+    let progress: &mut dyn Progress = match tty.as_mut() {
+        Some(p) => p,
+        None => &mut none,
+    };
+
+    let report = ntfs_contig::copy::copy(src, &out, &opts, progress)?;
+
+    println!("  bytes         {}", report.bytes);
+    println!("  contiguous    yes (1 extent)");
+    println!("  footer        preserved from the source");
+    println!("{} created", out.display());
     Ok(0)
 }
 
