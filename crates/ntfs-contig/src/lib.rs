@@ -36,6 +36,7 @@
 //! final cluster. That record is cluster tail, not file data.
 
 pub mod alloc;
+pub mod copy;
 pub mod error;
 pub mod extents;
 pub mod fsinfo;
