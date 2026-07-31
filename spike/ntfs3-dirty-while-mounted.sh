@@ -83,7 +83,11 @@ else
 fi
 echo
 
-echo "=== 5. comparison: ntfs-3g, which is known to set-on-mount ==="
+# RESULT (2026-07-30): this control did NOT behave as predicted — ntfs-3g read
+# 0x0000 while mounted, same as ntfs3. The premise below was wrong, so this run
+# had no working positive control. See S11 in FINDINGS.md, and
+# ntfs3-dirty-set-on-error.sh for a control that actually induces the flag.
+echo "=== 5. comparison: ntfs-3g, assumed to set-on-mount (IT DOES NOT) ==="
 if command -v ntfs-3g >/dev/null; then
   if sudo ntfs-3g "$LOOP" "$MNT" 2>/dev/null; then
     echo "  mounted rw via FUSE."
@@ -111,5 +115,11 @@ If steps 2/3 stay 0x0000, ntfs3 sets the flag only on error, and `doctor` can
 warn while mounted — which is the more useful behaviour, because it catches
 the problem before you unplug rather than after.
 
-Step 5 is the control: ntfs-3g is expected to show dirty while mounted.
+Step 5 was intended as a positive control, on the assumption that ntfs-3g sets
+the flag on read-write mount. It does not: measured 0x0000 there too. So this
+script shows only that nothing sets the flag during a healthy mount — it does
+NOT show that the reading would catch a flag a driver had set.
+
+For that, run ntfs3-dirty-set-on-error.sh, which induces the failure with a
+dm-error target instead of assuming a driver's behaviour.
 EOF

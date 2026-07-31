@@ -443,6 +443,58 @@ option 2 (link libntfs-3g under GPL and write the consolidation ourselves)
 remains technically viable, and is now better understood: we would be supplying
 the planner, not the mechanism.
 
+## S11. ntfs3 does not hold the dirty flag during a read-write mount. Confirmed, but the control failed.
+
+The question was whether `doctor` can report a dirty volume it is currently
+scanning, or whether that would fire on every healthy read-write mount.
+
+`spike/ntfs3-dirty-while-mounted.sh`, against a loopback NTFS volume:
+
+```
+1. unmounted baseline            flags 0x0000
+2. mounted rw with ntfs3         flags 0x0000
+3. after writing a file + sync   flags 0x0000
+4. after clean unmount           flags 0x0000
+5. ntfs-3g (FUSE), mounted rw    flags 0x0000
+   after clean unmount           flags 0x0000
+```
+
+So ntfs3 does not set the on-disk flag for the duration of a mount. The
+mounted-path check in `doctor` will not cry wolf, which is what was being
+asked.
+
+**But step 5 was meant to be a positive control and was not one.** ntfs-3g was
+expected to show dirty while mounted — that premise was simply wrong. Nothing
+in this run demonstrates the reading would have detected the flag had it been
+set by a driver, as opposed to set by our own byte patch in
+`tests/volume_real.rs`. A clean reading from an instrument not shown to detect
+the signal is weaker evidence than it appears.
+
+### And the flag may never reach the disk in the failure we care about
+
+Re-reading the kernel message captured during hardware acceptance:
+
+```
+ntfs3: sdb1: ino=3, ntfs_set_state failed, -5.
+ntfs3: sdb1: Mark volume as dirty due to NTFS errors
+```
+
+`ino=3` is MFT record 3 — `$Volume`, the record holding the flag.
+`ntfs_set_state failed, -5` is `EIO`: ntfs3 *tried to write the dirty flag and
+could not*, because the device had already left the bus. The second line
+records the in-memory state, not a successful write.
+
+That is the difference between "this volume is marked dirty" and "the driver
+wanted to mark it and the bus was already gone". Whether the on-disk flag ends
+up set in the IODD's mode-switch scenario is **open**, and needs the hardware:
+get the device into the state where it refuses to mount, then read it with
+`sudo iodd doctor /dev/sdX1`. If that reports `0x0000`, the refusal has a
+different cause and the diagnosis needs rethinking.
+
+`spike/ntfs3-dirty-set-on-error.sh` supplies the missing positive control by
+reproducing the disconnect with a dm-error target: a device that fails I/O and
+then returns, which is what the IODD does when it switches modes.
+
 ## S4. Incidental confirmations
 
 - `fallocate(2)` mode 0 succeeds on ntfs3. It does not return `EOPNOTSUPP`, so
